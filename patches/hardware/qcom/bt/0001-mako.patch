@@ -1,0 +1,133 @@
+diff --git a/msm8960/libbt-vendor/Android.mk b/msm8960/libbt-vendor/Android.mk
+index e95d9af7a73bd82604821fdc3a76034c07702ac0..57d379d34ac8ba4f829ca3fc53b3a79b45331284 100644
+--- a/msm8960/libbt-vendor/Android.mk
++++ b/msm8960/libbt-vendor/Android.mk
+@@ -29,6 +29,7 @@ LOCAL_SRC_FILES := \
+ 
+ LOCAL_C_INCLUDES += \
+         $(LOCAL_PATH)/include \
++        $(BDROID_DIR) \
+         $(BDROID_DIR)/hci/include \
+         $(BDROID_DIR)/stack/include
+ 
+@@ -37,6 +38,9 @@ LOCAL_SHARED_LIBRARIES := \
+         liblog
+ 
+ LOCAL_CFLAGS += -Wno-error
++ifeq ($(BOARD_BLUETOOTH_QCOM_USE_VENDOR_PROPERTIES),true)
++LOCAL_CFLAGS += -DBT_USE_VENDOR_PROPERTIES
++endif
+ LOCAL_MODULE := libbt-vendor
+ LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0
+ LOCAL_LICENSE_CONDITIONS := notice
+diff --git a/msm8960/libbt-vendor/src/bt_vendor_qcom.c b/msm8960/libbt-vendor/src/bt_vendor_qcom.c
+index b685ff6438874f034b9b18806b379e60c65ac5d3..cb97c8c043c1c737dc1afbe6a07b4f22e2c74109 100644
+--- a/msm8960/libbt-vendor/src/bt_vendor_qcom.c
++++ b/msm8960/libbt-vendor/src/bt_vendor_qcom.c
+@@ -24,7 +24,7 @@
+ 
+ #define LOG_TAG "bt_vendor"
+ 
+-#include <utils/Log.h>
++#include <log/log.h>
+ #include <string.h>
+ #include <fcntl.h>
+ #include <termios.h>
+diff --git a/msm8960/libbt-vendor/src/hardware.c b/msm8960/libbt-vendor/src/hardware.c
+index 21638d7b63d225898e1ff1082d906bfbadbc2d03..0d47ddf4e151fcd14463ce2e9361c778a40ebea9 100644
+--- a/msm8960/libbt-vendor/src/hardware.c
++++ b/msm8960/libbt-vendor/src/hardware.c
+@@ -26,7 +26,7 @@
+ 
+ #define LOG_TAG "bt_hwcfg"
+ 
+-#include <utils/Log.h>
++#include <log/log.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <signal.h>
+@@ -38,12 +38,19 @@
+ #include <cutils/properties.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+ #include "bt_types.h"
+ #include "bt_hci_bdroid.h"
+ #include "bt_vendor_qcom.h"
+ 
+ #define MAX_CNT_RETRY 100
+ 
++#ifdef BT_USE_VENDOR_PROPERTIES
++#define BT_PROPERTY_PREFIX "vendor."
++#else
++#define BT_PROPERTY_PREFIX ""
++#endif
++
+ int hw_config(int nState)
+ {
+     ALOGI("Starting hciattach daemon");
+@@ -57,7 +64,7 @@ int hw_config(int nState)
+ 
+     ALOGI("try to set %s", szReqSt);
+ 
+-    if (property_set("bluetooth.hciattach", szReqSt) < 0){
++    if (property_set(BT_PROPERTY_PREFIX "bluetooth.hciattach", szReqSt) < 0){
+         ALOGE("Property Setting fail");
+ 	return -1;
+     }
+@@ -68,7 +75,7 @@ int hw_config(int nState)
+ int readTrpState()
+ {
+     char szBtStatus[PROPERTY_VALUE_MAX] = {0, };
+-    if(property_get("bluetooth.status", szBtStatus, "") < 0){
++    if(property_get(BT_PROPERTY_PREFIX "bluetooth.status", szBtStatus, "") < 0){
+         ALOGE("Fail to get bluetooth satus");
+         return FALSE;
+     }
+diff --git a/msm8960/libbt-vendor/src/userial_vendor.c b/msm8960/libbt-vendor/src/userial_vendor.c
+index 1e9b39d590510705d79bfcb3062ca38d4004d7f7..5bb20635952d8fdbfdd6f9e13ce6307953eb0507 100644
+--- a/msm8960/libbt-vendor/src/userial_vendor.c
++++ b/msm8960/libbt-vendor/src/userial_vendor.c
+@@ -24,18 +24,22 @@
+ 
+ #define LOG_TAG "bt_userial_vendor"
+ 
+-#include <utils/Log.h>
++#include <log/log.h>
+ #include <termios.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <stdio.h>
++#include <string.h>
++#include <strings.h>
++#include <unistd.h>
++#include <cutils/properties.h>
+ #include "bt_vendor_qcom.h"
+ #include "userial_vendor.h"
+ 
+ bt_hci_transport_device_type bt_hci_set_transport()
+ {
+     int ret;
+-    char transport_type[10] = {0,};
++    char transport_type[PROPERTY_VALUE_MAX] = {0,};
+     bt_hci_transport_device_type bt_hci_transport_device;
+ 
+     ret = property_get("ro.qualcomm.bt.hci_transport", transport_type, NULL);
+@@ -65,6 +69,8 @@ static char *s_pszDevSmd[] = {
+     "/dev/smd2"
+ };
+ 
++static int bt_hci_init_transport_id(int chId);
++
+ int bt_hci_init_transport(int *pFd)
+ {
+     int i = 0;
+@@ -79,7 +85,7 @@ int bt_hci_init_transport(int *pFd)
+     return 0;
+ }
+ 
+-int bt_hci_init_transport_id (int chId )
++static int bt_hci_init_transport_id(int chId)
+ {
+   struct termios   term;
+   int fd = -1;
