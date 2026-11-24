@@ -1,0 +1,293 @@
+diff --git a/libril/ril_service.cpp b/libril/ril_service.cpp
+index 5d10eddcdf6783434c806453a97ab0acf128be9e..8734841fa71e60a40f2c09aba5ab649fa21144be 100755
+--- a/libril/ril_service.cpp
++++ b/libril/ril_service.cpp
+@@ -99,6 +99,13 @@ void convertRilLceDataInfoToHal(void *response, size_t responseLen, LceDataInfo&
+ void convertRilSignalStrengthToHal(void *response, size_t responseLen,
+         SignalStrength& signalStrength);
+ 
++static void convertLegacyStringArrayToHal(char **dc, size_t numStrings,
++                                          SetupDataCallResult &result);
++static void convertLegacyStructToHal(char *raw, SetupDataCallResult &result);
++static bool isPlausibleCallBlock(char **dc, size_t offset, size_t numStrings);
++static void parseLegacyDataCallList(char *response, size_t responseLen,
++                                    hidl_vec<SetupDataCallResult> &list);
++
+ void convertRilDataCallToHal(RIL_Data_Call_Response_v11 *dcResponse,
+         SetupDataCallResult& dcResult);
+ 
+@@ -2955,6 +2962,9 @@ int responseInt(RadioResponseInfo& responseInfo, int serial, int responseType, R
+     return ret;
+ }
+ 
++static RIL_CardStatus_v6 sLastCardStatus[SIM_COUNT];
++static bool sHasCardStatus[SIM_COUNT] = {};
++
+ int radio::getIccCardStatusResponse(int slotId,
+                                    int responseType, int serial, RIL_Errno e,
+                                    void *response, size_t responseLen) {
+@@ -2962,14 +2972,54 @@ int radio::getIccCardStatusResponse(int slotId,
+         RadioResponseInfo responseInfo = {};
+         populateResponseInfo(responseInfo, serial, responseType, e);
+         CardStatus cardStatus = {CardState::ABSENT, PinState::UNKNOWN, -1, -1, -1, {}};
++        RIL_CardStatus_v6 status;
+         RIL_CardStatus_v6 *p_cur = ((RIL_CardStatus_v6 *) response);
+-        if (response == NULL || responseLen != sizeof(RIL_CardStatus_v6)
++        if (response != NULL && responseLen == sizeof(RIL_CardStatus_v5)) {
++            // The mako QC RIL (KK-era) reports RIL_CardStatus_v5, which lacks
++            // the ims_subscription_app_index field. Copy it into a v6 struct.
++            RIL_CardStatus_v5 *v5 = (RIL_CardStatus_v5 *) response;
++            memset(&status, 0, sizeof(status));
++            status.card_state = v5->card_state;
++            status.universal_pin_state = v5->universal_pin_state;
++            status.gsm_umts_subscription_app_index = v5->gsm_umts_subscription_app_index;
++            status.cdma_subscription_app_index = v5->cdma_subscription_app_index;
++            status.ims_subscription_app_index = -1;
++            status.num_applications = v5->num_applications;
++            memcpy(status.applications, v5->applications, sizeof(v5->applications));
++            p_cur = &status;
++        }
++        if (response == NULL
++                || (responseLen != sizeof(RIL_CardStatus_v6)
++                    && responseLen != sizeof(RIL_CardStatus_v5))
+                 || p_cur->gsm_umts_subscription_app_index >= p_cur->num_applications
+                 || p_cur->cdma_subscription_app_index >= p_cur->num_applications
+                 || p_cur->ims_subscription_app_index >= p_cur->num_applications) {
+-            RLOGE("getIccCardStatusResponse: Invalid response");
+-            if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++            if (sHasCardStatus[slotId]) {
++                // The mako QC RIL occasionally returns an empty card status;
++                // reuse the last good one so the framework never loses the
++                // ICCID and the subscription mapping.
++                RLOGD("getIccCardStatusResponse: reusing cached card status (len=%zu)",
++                      responseLen);
++                p_cur = &sLastCardStatus[slotId];
++            } else {
++                RLOGE("getIccCardStatusResponse: Invalid response (len=%zu, expected "
++                      "v6=%zu/v5=%zu)", responseLen, sizeof(RIL_CardStatus_v6),
++                      sizeof(RIL_CardStatus_v5));
++                if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++            }
++        }
++        if (response == NULL
++                || (responseLen != sizeof(RIL_CardStatus_v6)
++                    && responseLen != sizeof(RIL_CardStatus_v5))
++                || p_cur->gsm_umts_subscription_app_index >= p_cur->num_applications
++                || p_cur->cdma_subscription_app_index >= p_cur->num_applications
++                || p_cur->ims_subscription_app_index >= p_cur->num_applications) {
++            // no cached status available either; leave cardStatus as ABSENT.
+         } else {
++            if (p_cur != &sLastCardStatus[slotId]) {
++                sLastCardStatus[slotId] = *p_cur;
++                sHasCardStatus[slotId] = true;
++            }
+             cardStatus.cardState = (CardState) p_cur->card_state;
+             cardStatus.universalPinState = (PinState) p_cur->universal_pin_state;
+             cardStatus.gsmUmtsSubscriptionAppIndex = p_cur->gsm_umts_subscription_app_index;
+@@ -4057,17 +4107,29 @@ int radio::setupDataCallResponse(int slotId,
+ 
+         SetupDataCallResult result = {};
+         if (response == NULL || (responseLen % sizeof(RIL_Data_Call_Response_v11)) != 0) {
+-            if (response != NULL) {
+-                RLOGE("setupDataCallResponse: Invalid response");
+-                if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++            if (response != NULL && responseLen == 9 * sizeof(int32_t)) {
++                // mako QC RIL: fixed 9-word struct (no pcscf/mtu).
++                RLOGD("setupDataCallResponse: legacy 9-word struct");
++                convertLegacyStructToHal((char *)response, result);
++            } else if (response != NULL && responseLen >= 6 * sizeof(char *)) {
++                // Defensive: legacy string-array format.
++                RLOGD("setupDataCallResponse: legacy string-array format (%zu strings)",
++                      responseLen / sizeof(char *));
++                convertLegacyStringArrayToHal((char **)response, responseLen / sizeof(char *),
++                                              result);
++            } else {
++                if (response != NULL) {
++                    RLOGE("setupDataCallResponse: Invalid response");
++                    if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++                }
++                result.status = DataCallFailCause::ERROR_UNSPECIFIED;
++                result.type = hidl_string();
++                result.ifname = hidl_string();
++                result.addresses = hidl_string();
++                result.dnses = hidl_string();
++                result.gateways = hidl_string();
++                result.pcscf = hidl_string();
+             }
+-            result.status = DataCallFailCause::ERROR_UNSPECIFIED;
+-            result.type = hidl_string();
+-            result.ifname = hidl_string();
+-            result.addresses = hidl_string();
+-            result.dnses = hidl_string();
+-            result.gateways = hidl_string();
+-            result.pcscf = hidl_string();
+         } else {
+             convertRilDataCallToHal((RIL_Data_Call_Response_v11 *) response, result);
+         }
+@@ -4750,8 +4812,14 @@ int radio::getDataCallListResponse(int slotId,
+         hidl_vec<SetupDataCallResult> ret;
+         if ((response == NULL && responseLen != 0)
+                 || responseLen % sizeof(RIL_Data_Call_Response_v11) != 0) {
+-            RLOGE("getDataCallListResponse: invalid response");
+-            if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++            if (response != NULL && responseLen >= sizeof(char *)) {
++                // mako QC RIL: legacy format (9-word struct or string array).
++                RLOGD("getDataCallListResponse: legacy format (len=%zu)", responseLen);
++                parseLegacyDataCallList((char *)response, responseLen, ret);
++            } else {
++                RLOGE("getDataCallListResponse: invalid response");
++                if (e == RIL_E_SUCCESS) responseInfo.error = RadioError::INVALID_RESPONSE;
++            }
+         } else {
+             convertRilDataCallListToHal(response, responseLen, ret);
+         }
+@@ -7030,6 +7098,124 @@ int radio::currentSignalStrengthInd(int slotId,
+     return 0;
+ }
+ 
++// ---------------------------------------------------------------------------
++// Legacy (pre-RIL v11) data call response parsing.
++//
++// The mako QC RIL (KK-era, RIL version 11) returns setupDataCall /
++// getDataCallList / dataCallListChanged responses in an older fixed-size
++// struct format instead of the RIL_Data_Call_Response_v11 struct:
++//   int status, int suggestedRetryTime, int cid, int active,
++//   char *type, char *ifname, char *addresses, char *dnses, char *gateways
++// (9 words; no pcscf, no mtu). Some builds may return the legacy string-array
++// format instead. Optional fields use the (char*)-1 sentinel, and pointers
++// must always be validated before dereferencing.
++// ---------------------------------------------------------------------------
++static bool isLegacyString(char *s) {
++    return s != NULL && s != (char *)-1 && (uintptr_t)s >= 0x10000;
++}
++
++static void convertLegacyStringArrayToHal(char **dc, size_t numStrings,
++                                          SetupDataCallResult &result) {
++    result.status = DataCallFailCause::NONE;
++    result.suggestedRetryTime = 0;
++    result.cid = 0;
++    result.active = 0;
++    result.type = hidl_string();
++    result.ifname = hidl_string();
++    result.addresses = hidl_string();
++    result.dnses = hidl_string();
++    result.gateways = hidl_string();
++    result.pcscf = hidl_string();
++    result.mtu = 0;
++
++    if (numStrings > 0 && isLegacyString(dc[0])) result.status = (DataCallFailCause)atoi(dc[0]);
++    if (numStrings > 1 && isLegacyString(dc[1])) result.suggestedRetryTime = atoi(dc[1]);
++    if (numStrings > 2 && isLegacyString(dc[2])) result.cid = atoi(dc[2]);
++    if (numStrings > 3 && isLegacyString(dc[3])) result.active = atoi(dc[3]);
++    if (numStrings > 4 && isLegacyString(dc[4])) result.type = convertCharPtrToHidlString(dc[4]);
++    if (numStrings > 5 && isLegacyString(dc[5])) result.ifname = convertCharPtrToHidlString(dc[5]);
++    if (numStrings > 6 && isLegacyString(dc[6])) {
++        result.addresses = convertCharPtrToHidlString(dc[6]);
++    }
++    if (numStrings > 7 && isLegacyString(dc[7])) result.dnses = convertCharPtrToHidlString(dc[7]);
++    if (numStrings > 8 && isLegacyString(dc[8])) {
++        result.gateways = convertCharPtrToHidlString(dc[8]);
++    }
++    if (numStrings > 9 && isLegacyString(dc[9])) result.pcscf = convertCharPtrToHidlString(dc[9]);
++    if (numStrings > 10 && isLegacyString(dc[10])) result.mtu = atoi(dc[10]);
++}
++
++static void convertLegacyStructToHal(char *raw, SetupDataCallResult &result) {
++    int32_t *words = (int32_t *)raw;
++    result.status = (DataCallFailCause)words[0];
++    result.suggestedRetryTime = words[1];
++    result.cid = words[2];
++    result.active = words[3];
++    result.type = hidl_string();
++    result.ifname = hidl_string();
++    result.addresses = hidl_string();
++    result.dnses = hidl_string();
++    result.gateways = hidl_string();
++    result.pcscf = hidl_string();
++    result.mtu = 0;
++    if (isLegacyString((char *)words[4])) result.type = convertCharPtrToHidlString((char *)words[4]);
++    if (isLegacyString((char *)words[5])) result.ifname = convertCharPtrToHidlString((char *)words[5]);
++    if (isLegacyString((char *)words[6])) {
++        result.addresses = convertCharPtrToHidlString((char *)words[6]);
++    }
++    if (isLegacyString((char *)words[7])) result.dnses = convertCharPtrToHidlString((char *)words[7]);
++    if (isLegacyString((char *)words[8])) {
++        result.gateways = convertCharPtrToHidlString((char *)words[8]);
++    }
++}
++
++static bool isPlausibleCallBlock(char **dc, size_t offset, size_t numStrings) {
++    // A legacy string-array call block must at least carry a numeric status
++    // and cid at the expected offsets.
++    if (offset + 6 > numStrings) return false;
++    if (!isLegacyString(dc[offset])) return false;
++    const int status = atoi(dc[offset]);
++    if (status == 0 && dc[offset][0] != '0') return false;
++    if (!isLegacyString(dc[offset + 2])) return false;
++    (void)atoi(dc[offset + 2]);
++    return true;
++}
++
++static void parseLegacyDataCallList(char *response, size_t responseLen,
++                                    hidl_vec<SetupDataCallResult> &list) {
++    std::vector<SetupDataCallResult> out;
++    if (responseLen % (9 * sizeof(int32_t)) == 0 && responseLen >= 9 * sizeof(int32_t)) {
++        // Fixed 9-word struct per call (mako QC RIL).
++        int num = responseLen / (9 * sizeof(int32_t));
++        for (int i = 0; i < num; i++) {
++            SetupDataCallResult result;
++            convertLegacyStructToHal(response + i * 9 * sizeof(int32_t), result);
++            out.push_back(result);
++        }
++    } else {
++        // NULL-terminated string-array format.
++        char **dc = (char **)response;
++        size_t numStrings = responseLen / sizeof(char *);
++        size_t offset = 0;
++        while (offset < numStrings && isLegacyString(dc[offset])) {
++            size_t stride = 10;
++            if (!isPlausibleCallBlock(dc, offset + stride, numStrings) &&
++                isPlausibleCallBlock(dc, offset + 9, numStrings)) {
++                stride = 9;
++            } else if (!isPlausibleCallBlock(dc, offset + stride, numStrings) &&
++                       isPlausibleCallBlock(dc, offset + 11, numStrings)) {
++                stride = 11;
++            }
++            SetupDataCallResult result;
++            convertLegacyStringArrayToHal(&dc[offset], stride, result);
++            out.push_back(result);
++            offset += stride;
++        }
++    }
++    list.resize(out.size());
++    for (size_t i = 0; i < out.size(); i++) list[i] = out[i];
++}
++
+ void convertRilDataCallToHal(RIL_Data_Call_Response_v11 *dcResponse,
+         SetupDataCallResult& dcResult) {
+     dcResult.status = (DataCallFailCause) dcResponse->status;
+@@ -7060,13 +7246,20 @@ int radio::dataCallListChangedInd(int slotId,
+                                   int indicationType, int token, RIL_Errno e, void *response,
+                                   size_t responseLen) {
+     if (radioService[slotId] != NULL && radioService[slotId]->mRadioIndication != NULL) {
++        hidl_vec<SetupDataCallResult> dcList;
+         if ((response == NULL && responseLen != 0)
+                 || responseLen % sizeof(RIL_Data_Call_Response_v11) != 0) {
+-            RLOGE("dataCallListChangedInd: invalid response");
+-            return 0;
++            if (response != NULL && responseLen >= sizeof(char *)) {
++                // mako QC RIL: legacy format (9-word struct or string array).
++                RLOGD("dataCallListChangedInd: legacy format (len=%zu)", responseLen);
++                parseLegacyDataCallList((char *)response, responseLen, dcList);
++            } else {
++                RLOGE("dataCallListChangedInd: invalid response");
++                return 0;
++            }
++        } else {
++            convertRilDataCallListToHal(response, responseLen, dcList);
+         }
+-        hidl_vec<SetupDataCallResult> dcList;
+-        convertRilDataCallListToHal(response, responseLen, dcList);
+ #if VDBG
+         RLOGD("dataCallListChangedInd");
+ #endif
