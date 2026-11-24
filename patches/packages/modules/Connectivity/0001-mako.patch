@@ -1,0 +1,282 @@
+diff --git a/bpf/headers/include/bpf/BpfMap.h b/bpf/headers/include/bpf/BpfMap.h
+index 8ef564dbf141608cdc85d1ba8cc2cd4f425e7a6c..d371a989779da4ef99881c057d37b0398a9b5089 100644
+--- a/bpf/headers/include/bpf/BpfMap.h
++++ b/bpf/headers/include/bpf/BpfMap.h
+@@ -106,6 +106,7 @@ class BpfMapRO {
+ 
+   protected:
+     void abortOnMismatch(bool writable) const {
++        if (!mMapFd.ok() && errno == ENOSYS && !isAtLeastKernelVersion(4, 4)) return;
+         if (!mMapFd.ok()) Abort(errno, "mMapFd %d is not valid", mMapFd.get());
+         if (isAtLeastKernelVersion(4, 14)) {
+             int flags = bpfGetFdMapFlags(mMapFd);
+diff --git a/bpf/loader/netbpfload.35rc b/bpf/loader/netbpfload.35rc
+index a23bd60e107d504a4644809d6dc56f13f7b48cf3..2c12014e1cbbf47a28ec2f6a418262f7383c2feb 100644
+--- a/bpf/loader/netbpfload.35rc
++++ b/bpf/loader/netbpfload.35rc
+@@ -65,5 +65,5 @@ service bpfloader /apex/com.android.tethering/bin/netbpfload
+     #    'cannot prove return value is 0 or 1' or 'unsupported / unknown operation / helper',
+     #    'invalid bpf_context access', etc.
+     #
+-    reboot_on_failure reboot,bpfloader-failed
++    # Allow legacy devices without kernel BPF support to continue booting.
+     override
+diff --git a/bpf/netd/NetdUpdatable.cpp b/bpf/netd/NetdUpdatable.cpp
+index 3b15916398be151b2fbc6d78a0f7b3ca26af1010..b9463268c81ca7a1f68d784ba0dc20e61d9e6e31 100644
+--- a/bpf/netd/NetdUpdatable.cpp
++++ b/bpf/netd/NetdUpdatable.cpp
+@@ -20,27 +20,39 @@
+ 
+ #include <android-base/logging.h>
+ #include <netdutils/Status.h>
++#include <unistd.h>
+ 
+ #include "NetdUpdatablePublic.h"
+ 
+ static android::net::BpfHandler sBpfHandler;
++static bool sBpfDisabled = false;
+ 
+ int libnetd_updatable_init(const char* cg2_path) {
+     android::base::InitLogging(/*argv=*/nullptr);
+     LOG(INFO) << __func__ << ": Initializing";
+ 
++    // Fall back to legacy iptables networking when the kernel lacks pinned BPF maps.
++    if (access("/sys/fs/bpf/netd_shared/map_netd_cookie_tag_map", F_OK) != 0) {
++        LOG(WARNING) << __func__ << ": BPF maps unavailable; using legacy networking";
++        sBpfDisabled = true;
++        return 0;
++    }
++
+     android::netdutils::Status ret = sBpfHandler.init(cg2_path);
+     if (!android::netdutils::isOk(ret)) {
+         LOG(ERROR) << __func__ << ": Failed: (" << ret.code() << ") " << ret.msg();
+-        abort();
++        sBpfDisabled = true;
++        return 0;
+     }
+     return 0;
+ }
+ 
+ int libnetd_updatable_tagSocket(int sockFd, uint32_t tag, uid_t chargeUid, uid_t realUid) {
++    if (sBpfDisabled) return 0;
+     return sBpfHandler.tagSocket(sockFd, tag, chargeUid, realUid);
+ }
+ 
+ int libnetd_updatable_untagSocket(int sockFd) {
++    if (sBpfDisabled) return 0;
+     return sBpfHandler.untagSocket(sockFd);
+ }
+diff --git a/framework/src/android/net/BpfNetMapsUtils.java b/framework/src/android/net/BpfNetMapsUtils.java
+index 1760fa7ec281189402d67a8e23d5ec5c1a5aa17e..8ad9e62e12f03e2d750ac0b6832490780f8ebd08 100644
+--- a/framework/src/android/net/BpfNetMapsUtils.java
++++ b/framework/src/android/net/BpfNetMapsUtils.java
+@@ -216,7 +216,7 @@ public class BpfNetMapsUtils {
+         final long match = getMatchByFirewallChain(chain);
+         try {
+             final U32 config = configurationMap.getValue(UID_RULES_CONFIGURATION_KEY);
+-            return (config.val & match) != 0;
++            return config != null && (config.val & match) != 0;
+         } catch (ErrnoException e) {
+             throw new ServiceSpecificException(e.errno,
+                     "Unable to get firewall chain status: " + Os.strerror(e.errno));
+@@ -270,7 +270,12 @@ public class BpfNetMapsUtils {
+         final long uidRuleConfig;
+         final long uidMatch;
+         try {
+-            uidRuleConfig = configurationMap.getValue(UID_RULES_CONFIGURATION_KEY).val;
++            // The compatibility map on kernels without eBPF has no BPF firewall rules.
++            final U32 config = configurationMap.getValue(UID_RULES_CONFIGURATION_KEY);
++            if (config == null) {
++                return BLOCKED_REASON_NONE;
++            }
++            uidRuleConfig = config.val;
+             final UidOwnerValue value = uidOwnerMap.getValue(new Struct.S32(uid));
+             uidMatch = (value != null) ? value.rule : 0L;
+         } catch (ErrnoException e) {
+@@ -366,7 +371,8 @@ public class BpfNetMapsUtils {
+         throwIfPreT("getDataSaverEnabled is not available on pre-T devices");
+ 
+         try {
+-            return dataSaverEnabledMap.getValue(DATA_SAVER_ENABLED_KEY).val == DATA_SAVER_ENABLED;
++            final U8 enabled = dataSaverEnabledMap.getValue(DATA_SAVER_ENABLED_KEY);
++            return enabled != null && enabled.val == DATA_SAVER_ENABLED;
+         } catch (ErrnoException e) {
+             throw new ServiceSpecificException(e.errno, "Unable to get data saver: "
+                     + Os.strerror(e.errno));
+diff --git a/service-t/jni/com_android_server_net_NetworkStatsFactory.cpp b/service-t/jni/com_android_server_net_NetworkStatsFactory.cpp
+index 5edd0f6559c6d5d1e0da6f24aa58e09394deb9ce..5cd066d1ea57482058675c7be7713bff8b3d3f59 100644
+--- a/service-t/jni/com_android_server_net_NetworkStatsFactory.cpp
++++ b/service-t/jni/com_android_server_net_NetworkStatsFactory.cpp
+@@ -179,7 +179,9 @@ static int statsLinesToNetworkStats(JNIEnv* env, jclass clazz, jobject stats,
+ static int readNetworkStatsDetail(JNIEnv* env, jclass clazz, jobject stats) {
+     std::vector<stats_line> lines;
+ 
+-    if (parseBpfNetworkStatsDetail(&lines) < 0) return -1;
++    const int status = parseBpfNetworkStatsDetail(&lines);
++    // Legacy kernels without the BPF syscall have no counters to report.
++    if (status < 0 && !(status == -ENOSYS && !bpf::isAtLeastKernelVersion(4, 4))) return -1;
+ 
+     return statsLinesToNetworkStats(env, clazz, stats, lines);
+ }
+@@ -187,7 +189,8 @@ static int readNetworkStatsDetail(JNIEnv* env, jclass clazz, jobject stats) {
+ static int readNetworkStatsDev(JNIEnv* env, jclass clazz, jobject stats) {
+     std::vector<stats_line> lines;
+ 
+-    if (parseBpfNetworkStatsDev(&lines) < 0) return -1;
++    const int status = parseBpfNetworkStatsDev(&lines);
++    if (status < 0 && !(status == -ENOSYS && !bpf::isAtLeastKernelVersion(4, 4))) return -1;
+ 
+     return statsLinesToNetworkStats(env, clazz, stats, lines);
+ }
+diff --git a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+index 70991ebad37d4f196850d4d777b960a604f2c7b8..106b7caf9ce7a6408a6e00def96c7d2b1805e58e 100644
+--- a/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
++++ b/service/jni/com_android_server_connectivity_ClatCoordinator.cpp
+@@ -106,6 +106,7 @@ static void verifyClatPerms() {
+     // failures here are 99% likely to be build problems.
+     V(kClatdDir, S_IFDIR|0750, CLAT, SYSTEM, "system_file", DIR);
+     V(kClatdBin, S_IFREG|S_ISUID|S_ISGID|0755, CLAT, CLAT, "clatd_exec", BIN);
++    if (fatal) abort();
+ 
+     // Move on to verifying that the bpf programs and maps are as expected.
+     // This relies on the kernel and bpfloader.
+@@ -113,6 +114,16 @@ static void verifyClatPerms() {
+     // Clat BPF was only mainlined during T.
+     if (!modules::sdklevel::IsAtLeastT()) return;
+ 
++    // A 3.4 kernel can expose the mountpoint without implementing eBPF.
++    int probe = bpf::retrieveProgram(
++            "/sys/fs/bpf/net_shared/prog_clatd_schedcls_egress4_clat_rawip");
++    if (probe >= 0) {
++        close(probe);
++    } else if (errno == ENOSYS && !bpf::isAtLeastKernelVersion(4, 4)) {
++        ALOGW("Kernel lacks eBPF; CLAT BPF offload unavailable");
++        return;
++    }
++
+     V("/sys/fs/bpf", S_IFDIR|S_ISVTX|0777, ROOT, ROOT, "fs_bpf", DIR);
+ 
+     V("/sys/fs/bpf/net_shared", S_IFDIR|01777, ROOT, ROOT, "fs_bpf_net_shared", DIR);
+diff --git a/staticlibs/device/com/android/net/module/util/BpfMap.java b/staticlibs/device/com/android/net/module/util/BpfMap.java
+index 5488706533efc2591b94becd7d7086e502ebacf7..6e8473497412fece8deb8016b42405896cb97b0c 100644
+--- a/staticlibs/device/com/android/net/module/util/BpfMap.java
++++ b/staticlibs/device/com/android/net/module/util/BpfMap.java
+@@ -18,10 +18,12 @@ package com.android.net.module.util;
+ import static android.system.OsConstants.EBUSY;
+ import static android.system.OsConstants.EEXIST;
+ import static android.system.OsConstants.ENOENT;
++import static android.system.OsConstants.ENOSYS;
+ 
+ import android.os.Build;
+ import android.os.ParcelFileDescriptor;
+ import android.system.ErrnoException;
++import android.util.Log;
+ import android.util.Pair;
+ 
+ import androidx.annotation.NonNull;
+@@ -65,6 +67,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     private static final int BPF_EXIST = 2;
+ 
+     private final ParcelFileDescriptor mMapFd;
++    private static volatile boolean sMakoWithoutKernelBpf;
+     private final Class<K> mKeyClass;
+     private final Class<V> mValueClass;
+     private final int mKeySize;
+@@ -72,7 +75,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+ 
+     // The following is (ab)used by BpfBitmap.java
+     /* package */ int getFd() {
+-        return mMapFd.getFd();
++        return mMapFd == null ? -1 : mMapFd.getFd();
+     }
+ 
+     private static ConcurrentHashMap<Pair<String, Integer>, ParcelFileDescriptor> sFdCache =
+@@ -124,7 +127,18 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+         mValueClass = value;
+         mKeySize = Struct.getSize(key);
+         mValueSize = Struct.getSize(value);
+-        mMapFd = cachedBpfFdGet(path, flag, mKeySize, mValueSize);
++        ParcelFileDescriptor fd;
++        try {
++            fd = cachedBpfFdGet(path, flag, mKeySize, mValueSize);
++        } catch (ErrnoException e) {
++            if (!"mako".equals(Build.DEVICE) || e.errno != ENOSYS) throw e;
++            if (!sMakoWithoutKernelBpf) {
++                Log.w("BpfMap", "Mako bring-up: no kernel BPF accounting or policy enforcement");
++                sMakoWithoutKernelBpf = true;
++            }
++            fd = null;
++        }
++        mMapFd = fd;
+     }
+ 
+     /**
+@@ -144,6 +158,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+      */
+     @Override
+     public void updateEntry(K key, V value) throws ErrnoException {
++        if (mMapFd == null) return;
+         nativeWriteToMapEntry(mMapFd.getFd(), key.writeToBytes(), value.writeToBytes(), BPF_ANY);
+     }
+ 
+@@ -154,6 +169,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     @Override
+     public void insertEntry(K key, V value)
+             throws ErrnoException, IllegalStateException {
++        if (mMapFd == null) return;
+         try {
+             nativeWriteToMapEntry(mMapFd.getFd(), key.writeToBytes(), value.writeToBytes(),
+                     BPF_NOEXIST);
+@@ -171,6 +187,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     @Override
+     public void replaceEntry(K key, V value)
+             throws ErrnoException, NoSuchElementException {
++        if (mMapFd == null) return;
+         try {
+             nativeWriteToMapEntry(mMapFd.getFd(), key.writeToBytes(), value.writeToBytes(),
+                     BPF_EXIST);
+@@ -190,6 +207,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     @Override
+     public boolean insertOrReplaceEntry(K key, V value)
+             throws ErrnoException {
++        if (mMapFd == null) return false;
+         try {
+             nativeWriteToMapEntry(mMapFd.getFd(), key.writeToBytes(), value.writeToBytes(),
+                     BPF_NOEXIST);
+@@ -216,10 +234,12 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     /** Remove existing key from eBpf map. Return false if map was not modified. */
+     @Override
+     public boolean deleteEntry(K key) throws ErrnoException {
++        if (mMapFd == null) return false;
+         return nativeDeleteMapEntry(mMapFd.getFd(), key.writeToBytes());
+     }
+ 
+     private K getNextKeyInternal(@Nullable K key) throws ErrnoException {
++        if (mMapFd == null) return null;
+         byte[] rawKey = new byte[mKeySize];
+ 
+         if (!nativeGetNextMapKey(mMapFd.getFd(),
+@@ -251,6 +271,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     @Override
+     public boolean containsKey(@NonNull K key) throws ErrnoException {
+         Objects.requireNonNull(key);
++        if (mMapFd == null) return false;
+ 
+         byte[] rawValue = new byte[mValueSize];
+         return nativeFindMapEntry(mMapFd.getFd(), key.writeToBytes(), rawValue);
+@@ -260,6 +281,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+     @Override
+     public V getValue(@NonNull K key) throws ErrnoException {
+         Objects.requireNonNull(key);
++        if (mMapFd == null) return null;
+ 
+         byte[] rawValue = new byte[mValueSize];
+         if (!nativeFindMapEntry(mMapFd.getFd(), key.writeToBytes(), rawValue)) return null;
+@@ -269,6 +291,7 @@ public class BpfMap<K extends Struct, V extends Struct> implements IBpfMap<K, V>
+ 
+     /** Synchronize Kernel RCU */
+     public static void synchronizeKernelRCU() throws ErrnoException {
++        if (sMakoWithoutKernelBpf) return;
+         final int err = nativeSynchronizeKernelRCU();
+         if (err != 0) {
+             final int errno = -err;
