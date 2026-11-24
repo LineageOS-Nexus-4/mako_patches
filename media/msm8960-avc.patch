@@ -1,0 +1,99 @@
+diff --git a/mm-core/src/8960/qc_registry_table_android.c b/mm-core/src/8960/qc_registry_table_android.c
+index 3e0124ded..67d4afba1 100644
+--- a/mm-core/src/8960/qc_registry_table_android.c
++++ b/mm-core/src/8960/qc_registry_table_android.c
+@@ -56,6 +56,7 @@ omx_core_cb_type core[] =
+       "video_decoder.avc"
+     }
+   },
++#ifndef MAKO_ONLY_AVC
+   {
+     "OMX.qcom.video.decoder.avc.secure",
+     NULL, // Create instance function
+@@ -504,6 +505,7 @@ omx_core_cb_type core[] =
+       "container_muxer.mp2"
+     }
+   }
++#endif
+ };
+ 
+ const unsigned int SIZE_OF_CORE = sizeof(core) / sizeof(omx_core_cb_type);
+diff --git a/mm-video/vidc/vdec/src/omx_vdec.cpp b/mm-video/vidc/vdec/src/omx_vdec.cpp
+index 52a4e852a..f7d95e7bc 100644
+--- a/mm-video/vidc/vdec/src/omx_vdec.cpp
++++ b/mm-video/vidc/vdec/src/omx_vdec.cpp
+@@ -48,7 +48,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include "omx_vdec.h"
+ #include <fcntl.h>
+ #include <limits.h>
+-#include <QServiceUtils.h>
++#include <binder/IServiceManager.h>
+ 
+ #ifndef _ANDROID_
+ #include <sys/ioctl.h>
+@@ -142,7 +142,6 @@ char ouputextradatafilename [] = "/data/misc/media/extradata";
+ #endif
+ 
+ #ifdef _ANDROID_
+-#include <ActivityManager.h>
+ #include <binder/IBinder.h>
+ #include <binder/IMemory.h>
+ #include <binder/Parcel.h>
+@@ -10154,7 +10153,7 @@ bool omx_vdec::allocate_color_convert_buf::update_buffer_req()
+     return false;
+   }
+   if (!enabled){
+-    DEBUG_PRINT_ERROR("\n No color conversion required");
++    DEBUG_PRINT_LOW("\n No color conversion required");
+     return status;
+   }
+   if (omx->drv_ctx.output_format != VDEC_YUV_FORMAT_TILE_4x2 &&
+@@ -10636,43 +10635,13 @@ bool omx_vdec::allocate_color_convert_buf::get_color_format(OMX_COLOR_FORMATTYPE
+   return status;
+ }
+ 
+-int omx_vdec::secureDisplay(int mode) {
+-
+-    sp<IServiceManager> sm = defaultServiceManager();
+-
+-    pthread_mutex_lock(&m_secure_display_lock);
+-    if (m_secure_display == 0) {
+-        securing(mode);
+-        DEBUG_PRINT_HIGH("secureDisplay: %s",
+-            (mode == qService::IQService::END)?"END":"START");
+-    }
+-    if (mode == qService::IQService::END) {
+-        ++m_secure_display;
+-    }
+-    pthread_mutex_unlock(&m_secure_display_lock);
+-    return 0;
++// This mako port registers only the non-secure decoder.
++int omx_vdec::secureDisplay(int /*mode*/) {
++    return -ENOSYS;
+ }
+ 
+-int omx_vdec::unsecureDisplay(int mode) {
+-    if (m_secure_display == 0) {
+-        return 0;
+-    }
+-
+-    sp<IServiceManager> sm = defaultServiceManager();
+-
+-    pthread_mutex_lock(&m_secure_display_lock);
+-    if (m_secure_display == 1) {
+-        unsecuring(mode);
+-        DEBUG_PRINT_HIGH("unsecureDisplay: %s",
+-            (mode == qService::IQService::END)?"END":"START");
+-    }
+-    if (mode == qService::IQService::END) {
+-        --m_secure_display;
+-    }
+-    pthread_mutex_unlock(&m_secure_display_lock);
+-
+-
+-    return 0;
++int omx_vdec::unsecureDisplay(int /*mode*/) {
++    return -ENOSYS;
+ }
+ 
+ int omx_vdec::set_turbo_mode(bool mode)
