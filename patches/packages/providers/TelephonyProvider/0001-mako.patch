@@ -1,0 +1,123 @@
+diff --git a/src/com/android/providers/telephony/TelephonyProvider.java b/src/com/android/providers/telephony/TelephonyProvider.java
+index 7d0381b09a6f1ae89ef36fa67a2375bb17b5887f..a3d5f3e31779c276207e7e888f21c2c059bd7ae1 100644
+--- a/src/com/android/providers/telephony/TelephonyProvider.java
++++ b/src/com/android/providers/telephony/TelephonyProvider.java
+@@ -807,7 +807,8 @@ public class TelephonyProvider extends ContentProvider
+             mContext = context;
+             // Memory optimization - close idle connections after 30s of inactivity
+             setIdleConnectionTimeout(IDLE_CONNECTION_TIMEOUT_MS);
+-            setWriteAheadLoggingEnabled(false);
++            // Keep SIMINFO reads available while the background APN import writes.
++            setWriteAheadLoggingEnabled(true);
+         }
+ 
+         @Override
+@@ -815,15 +816,9 @@ public class TelephonyProvider extends ContentProvider
+             if (DBG) log("dbh.onCreate:+ db=" + db);
+             createSimInfoTable(db, SIMINFO_TABLE);
+             createCarriersTable(db, CARRIERS_TABLE);
+-            // if CarrierSettings app is installed, we expect it to do the initializiation instead
+-            if (apnSourceServiceExists(mContext)) {
+-                log("dbh.onCreate: Skipping apply APNs from xml.");
+-            } else {
+-                log("dbh.onCreate: Apply apns from xml.");
+-                initDatabase(db);
+-                // Notify listeners of DB change since DB has been updated
+-                mContext.getContentResolver().notifyChange(
+-                        CONTENT_URI, null, true, UserHandle.USER_ALL);
++            if (!apnSourceServiceExists(mContext)) {
++                // A recreated database needs an import even if its XML has not changed.
++                setApnConfChecksum(-1);
+             }
+             if (DBG) log("dbh.onCreate:- db=" + db);
+         }
+@@ -871,7 +866,7 @@ public class TelephonyProvider extends ContentProvider
+             long checkSum = -1;
+             try (CheckedInputStream cis =
+                 new CheckedInputStream(new FileInputStream(file), checkSummer)){
+-                byte[] buf = new byte[128];
++                byte[] buf = new byte[8192];
+                 if(cis != null) {
+                     while(cis.read(buf) >= 0) {
+                         // Just read for checksum to get calculated.
+@@ -3010,7 +3005,7 @@ public class TelephonyProvider extends ContentProvider
+         private void loadApns(SQLiteDatabase db, XmlPullParser parser, boolean isOverlay) {
+             if (parser != null) {
+                 try {
+-                    db.beginTransaction();
++                    db.beginTransactionNonExclusive();
+                     XmlUtils.nextElement(parser);
+                     while (parser.getEventType() != XmlPullParser.END_DOCUMENT) {
+                         ContentValues row = getRow(parser, isOverlay);
+@@ -3484,6 +3479,21 @@ public class TelephonyProvider extends ContentProvider
+     public boolean onCreate() {
+         mOpenHelper = new DatabaseHelper(getContext());
+         mDefaultSubId = SubscriptionManager.getDefaultSubscriptionId();
++
++        SharedPreferences spEnforcedFile = getContext().getSharedPreferences(ENFORCED_FILE,
++                Context.MODE_PRIVATE);
++        mManagedApnEnforced = spEnforcedFile.getBoolean(ENFORCED_KEY, false);
++
++        // This provider shares the phone process. Importing thousands of APNs
++        // here can block Application.onCreate and trigger a process-start ANR.
++        new Thread(this::updateApnsOnStartup, "ApnDatabaseInit").start();
++
++        ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
++        if (VDBG) log("onCreate:- ret true");
++        return true;
++    }
++
++    private void updateApnsOnStartup() {
+         boolean isNewBuild = false;
+         String newBuildId = SystemProperties.get("ro.build.id", null);
+         SharedPreferences sp = getContext().getSharedPreferences(BUILD_ID_FILE,
+@@ -3501,29 +3511,26 @@ public class TelephonyProvider extends ContentProvider
+             if (VDBG) log("onCreate: newBuildId is empty");
+         }
+ 
+-        if (isNewBuild) {
+-            if (!apnSourceServiceExists(getContext())) {
+-                // Update APN DB
++        // Also checks first creation and interrupted imports on the same build.
++        if (!apnSourceServiceExists(getContext())) {
++            try {
+                 updateApnDb();
++            } catch (SQLiteException e) {
++                loge("Startup APN database update failed: " + e);
++                return;
+             }
++        }
+ 
++        if (isNewBuild) {
+             // Add all APN related shared prefs to local log for dumpsys
+             if (DBG) addAllApnSharedPrefToLocalLog();
+         }
+ 
+-        // Write build id to SharedPreferences after APNs have been updated above by updateApnDb()
++        // Record the build ID after the APN DB check.
+         if (!TextUtils.isEmpty(newBuildId)) {
+             if (isNewBuild) log("onCreate: updating build id to " + newBuildId);
+             sp.edit().putString(RO_BUILD_ID, newBuildId).apply();
+         }
+-
+-        SharedPreferences spEnforcedFile = getContext().getSharedPreferences(ENFORCED_FILE,
+-                Context.MODE_PRIVATE);
+-        mManagedApnEnforced = spEnforcedFile.getBoolean(ENFORCED_KEY, false);
+-
+-        ProviderUtil.logRunningTelephonyProviderProcesses(getContext());
+-        if (VDBG) log("onCreate:- ret true");
+-        return true;
+     }
+ 
+     private void addAllApnSharedPrefToLocalLog() {
+@@ -5793,9 +5800,7 @@ public class TelephonyProvider extends ContentProvider
+             return;
+         }
+ 
+-        // On first boot getWritableDatabase() triggers
+-        // DatabaseHelper.onCreate() which in turn will call initDatabase.
+-        // To avoid loading APNs twice call getWritableDatabase() before needApnDbUpdate()
++        // Opening a fresh database resets the stored APN checksum.
+         SQLiteDatabase db = getWritableDatabase();
+ 
+         if (!needApnDbUpdate()) {
