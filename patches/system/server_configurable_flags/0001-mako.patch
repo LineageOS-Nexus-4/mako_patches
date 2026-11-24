@@ -1,0 +1,15 @@
+diff --git a/disaster_recovery/disaster_recovery.cc b/disaster_recovery/disaster_recovery.cc
+index 27bf4953b6bd78ed0810e0b6ad6863a4042cb28d..ac126f58d1fd2917ff69b11a913ab3a83484b788 100644
+--- a/disaster_recovery/disaster_recovery.cc
++++ b/disaster_recovery/disaster_recovery.cc
+@@ -27,6 +27,10 @@
+ // If reset_mode == UPDATABLE_CRASHING, the binary will directly perform
+ // flag reset actions.
+ int main(int argc, char* argv[]) {
++  // mako bring-up: stub. The flag-reset machinery spins on property scans and
++  // re-arms on every updatable-process crash, burning CPU until thermal
++  // shutdown. No flags are server-pushed on this device; skip it entirely.
++  return 0;
+   if (argc != 2) {
+     LOG(ERROR) << "argc: " << std::to_string(argc) << ", it should only be 2.";
+     return 1;
