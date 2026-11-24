@@ -1,0 +1,49 @@
+diff --git a/BoardConfigQcom.mk b/BoardConfigQcom.mk
+index bea6391c2e5b57306aa318880946a11f495fefa7..304fc58eda6ec6a2873fc2f99cd84e9debc765f3 100644
+--- a/BoardConfigQcom.mk
++++ b/BoardConfigQcom.mk
+@@ -389,6 +389,9 @@ TARGET_KERNEL_ADDITIONAL_FLAGS += TARGET_BOARD_PLATFORM=$(TARGET_BOARD_PLATFORM)
+ QCOM_SOONG_NAMESPACE ?= hardware/qcom-caf/$(QCOM_HARDWARE_VARIANT)
+ PRODUCT_SOONG_NAMESPACES += $(QCOM_SOONG_NAMESPACE)
+ 
++# Legacy devices may provide display in a separate non-CAF namespace.
++QCOM_DISPLAY_SOONG_NAMESPACE ?= $(QCOM_SOONG_NAMESPACE)/display
++
+ # Add bootctrl to PRODUCT_SOONG_NAMESPACES
+ PRODUCT_SOONG_NAMESPACES += hardware/qcom-caf/bootctrl
+ 
+@@ -404,7 +407,7 @@ ifneq ($(filter $(QSSI_SUPPORTED_PLATFORMS),$(TARGET_BOARD_PLATFORM)),)
+     endif
+     $(call soong_config_set,qtidisplay,headers_namespace,vendor/qcom/opensource/commonsys-intf/display)
+ else
+-    $(call soong_config_set,qtidisplay,headers_namespace,$(QCOM_SOONG_NAMESPACE)/display)
++    $(call soong_config_set,qtidisplay,headers_namespace,$(QCOM_DISPLAY_SOONG_NAMESPACE))
+ endif
+ 
+ # Add data-ipa-cfg-mgr to PRODUCT_SOONG_NAMESPACES if needed
+@@ -445,10 +448,12 @@ else
+     PRODUCT_SOONG_NAMESPACES += hardware/qcom-caf/thermal
+ endif
+ 
+-# Add wlan to PRODUCT_SOONG_NAMESPACES
++# Add CAF wlan unless the device selected the non-CAF legacy tree.
++ifneq ($(TARGET_USES_LEGACY_WLAN),true)
+ PRODUCT_SOONG_NAMESPACES += \
+     hardware/qcom-caf/wlan \
+     hardware/qcom-caf/wlan/qcwcn
++endif
+ 
+ # Verified Boot
+ BOARD_AVB_SYSTEM_ADD_HASHTREE_FOOTER_ARGS += --hash_algorithm sha256
+diff --git a/os_pickup_aosp.mk b/os_pickup_aosp.mk
+index 74e9040c92bd3bf4528ae6dd10ff616586ca594e..8dddec0b29ed144e1bb9f075ba757c0b239230e3 100644
+--- a/os_pickup_aosp.mk
++++ b/os_pickup_aosp.mk
+@@ -5,4 +5,7 @@ LOCAL_PATH := $(call my-dir)
+ 
+ ifneq ($(BOARD_USES_QCOM_HARDWARE),true)
+ include $(call first-makefiles-under,$(LOCAL_PATH))
++else ifeq ($(TARGET_USES_LEGACY_QCOM_HARDWARE),true)
++# mako and similar pre-CAF devices still build their platform HALs here.
++include $(call first-makefiles-under,$(LOCAL_PATH))
+ endif
