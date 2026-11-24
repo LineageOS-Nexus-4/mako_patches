@@ -1,0 +1,58 @@
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt
+index a050bca95609a83d4e75a6b4a2a8128b90a4abd1..c019f1bdec6f3ec8b903f924b8a756e2ada791ae 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/composable/UnifiedBattery.kt
+@@ -235,16 +235,25 @@ fun BatteryLayout(
+             } else if (iconStyle == BatteryRepository.ICON_STYLE_TEXT) {
+                 // Empty on purpose
+             } else {
++                val centerChargingBolt = attribution is BatteryGlyph.Bolt
++                val bodyGlyphsProvider = {
++                    if (centerChargingBolt) {
++                        listOf(BatteryGlyph.Bolt)
++                    } else {
++                        glyphsProvider()
++                    }
++                }
++
+                 BatteryBody(
+                     pathSpec = BatteryFrame.bodyPathSpec,
+                     levelProvider = levelProvider,
+-                    glyphsProvider = glyphsProvider,
++                    glyphsProvider = bodyGlyphsProvider,
+                     isFullProvider = isFullProvider,
+                     colorsProvider = colorsProvider,
+                     modifier = Modifier.layoutId(BatteryMeasurePolicy.LayoutId.Frame),
+                     contentDescription = contentDescription,
+                 )
+-                if (attribution != null) {
++                if (attribution != null && !centerChargingBolt) {
+                     BatteryAttribution(
+                         attr = attribution,
+                         colorsProvider = colorsProvider,
+@@ -257,7 +266,7 @@ fun BatteryLayout(
+                     BatteryCap(
+                         colorsProvider = colorsProvider,
+                         isFullProvider = isFullProvider,
+-                        glyphsProvider = glyphsProvider,
++                        glyphsProvider = bodyGlyphsProvider,
+                         modifier = Modifier.layoutId(BatteryMeasurePolicy.LayoutId.Cap),
+                     )
+                 }
+diff --git a/services/core/java/com/android/server/power/hint/HintManagerService.java b/services/core/java/com/android/server/power/hint/HintManagerService.java
+index 9174855b6466e35cae35bfc3f5eee6d687c44de5..8229b25f9dcc44e816811c82254b8dae7dde87a0 100644
+--- a/services/core/java/com/android/server/power/hint/HintManagerService.java
++++ b/services/core/java/com/android/server/power/hint/HintManagerService.java
+@@ -333,6 +333,12 @@ public final class HintManagerService extends SystemService {
+             } catch (RemoteException e) {
+                 throw new IllegalStateException("Could not contact PowerHAL!", e);
+             }
++        } else {
++            // Legacy HIDL-only devices have no AIDL support information.
++            // Keep capability queries and metrics valid with all features unsupported.
++            mSupportInfo = new SupportInfo();
++            mSupportInfo.headroom = new SupportInfo.HeadroomSupportInfo();
++            mSupportInfo.compositionData = new SupportInfo.CompositionDataSupportInfo();
+         }
+         if (mSupportInfo.headroom.isCpuSupported) {
+             mCpuHeadroomCache = new HeadroomCache<>(2, mSupportInfo.headroom.cpuMinIntervalMillis);
