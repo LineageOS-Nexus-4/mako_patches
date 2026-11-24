@@ -1,0 +1,68 @@
+diff --git a/bluetooth/1.0/default/Android.bp b/bluetooth/1.0/default/Android.bp
+index 84a49cf0a78cd21b229de37528bfe05a508e9e33..54c79b1c1314ce14ba3bf46b9489fdb0d04aab58 100644
+--- a/bluetooth/1.0/default/Android.bp
++++ b/bluetooth/1.0/default/Android.bp
+@@ -22,8 +22,28 @@ package {
+     default_applicable_licenses: ["hardware_interfaces_license"],
+ }
+ 
++// Legacy address loaders run as vendor helpers rather than a Bluetooth HAL
++// server. Boards can opt into a vendor-owned factory-address property.
++soong_config_module_type {
++    name: "legacy_bluetooth_cc_defaults",
++    module_type: "cc_defaults",
++    config_namespace: "legacy_bluetooth",
++    bool_variables: ["vendor_address"],
++    properties: ["cflags"],
++}
++
++legacy_bluetooth_cc_defaults {
++    name: "legacy_bluetooth_address_defaults",
++    soong_config_variables: {
++        vendor_address: {
++            cflags: ["-DBLUETOOTH_VENDOR_BDADDR"],
++        },
++    },
++}
++
+ cc_defaults {
+     name: "android.hardware.bluetooth@1.0-defaults",
++    defaults: ["legacy_bluetooth_address_defaults"],
+     vendor: true,
+     relative_install_path: "hw",
+     srcs: [
+diff --git a/bluetooth/1.0/default/bluetooth_address.cc b/bluetooth/1.0/default/bluetooth_address.cc
+index df3e84ae37fdbd86eddf40e68c87911fab7cf3f3..43875b38c29a1242dd5f2f590089ce65d1e1b5ed 100644
+--- a/bluetooth/1.0/default/bluetooth_address.cc
++++ b/bluetooth/1.0/default/bluetooth_address.cc
+@@ -82,6 +82,16 @@ bool BluetoothAddress::get_local_address(uint8_t* local_addr) {
+     return true;
+   }
+ 
++#ifdef BLUETOOTH_VENDOR_BDADDR
++  // Keep the legacy firmware helper outside the HAL server domain. It
++  // publishes the factory address through a property owned by the vendor.
++  if (property_get("vendor.bluetooth.bdaddr", property, NULL) &&
++      string_to_bytes(property, local_addr)) {
++    ALOGD("%s: Using vendor factory address", __func__);
++    return true;
++  }
++#endif
++
+   // No factory BDADDR found. Look for a previously stored BDA.
+   if (property_get(PERSIST_BDADDR_PROPERTY, property, NULL) &&
+       string_to_bytes(property, local_addr)) {
+diff --git a/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp b/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
+index f14cbc77e5d8845972024a5872f5458e13c4cfd2..a81298f45932a60413809b83f548d3f089a81c2b 100644
+--- a/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
++++ b/graphics/composer/2.1/utils/hwc2on1adapter/HWC2On1Adapter.cpp
+@@ -1875,6 +1875,9 @@ void HWC2On1Adapter::Display::prepareFramebufferTarget() {
+ 
+     auto& hwc1Target = mHwc1RequestedContents->hwLayers[mLayers.size()];
+     hwc1Target.compositionType = HWC_FRAMEBUFFER_TARGET;
++    // Legacy HWC1 uses the previous client target to configure its framebuffer
++    // pipes during prepare. set() supplies the current buffer and acquire fence.
++    hwc1Target.handle = mClientTarget.getBuffer();
+     hwc1Target.releaseFenceFd = -1;
+     hwc1Target.hints = 0;
+     hwc1Target.flags = 0;
