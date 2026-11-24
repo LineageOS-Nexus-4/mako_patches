@@ -1,0 +1,72 @@
+diff --git a/contents/namespace/sphal.cc b/contents/namespace/sphal.cc
+index c91eefa65549239755bf0a1ebd884c14b1f9befe..8faa608f8df1be6487f2d580e633975275ee6400 100644
+--- a/contents/namespace/sphal.cc
++++ b/contents/namespace/sphal.cc
+@@ -29,6 +29,7 @@
+ #include "linkerconfig/environment.h"
+ 
+ #include <android-base/strings.h>
++#include <android-base/properties.h>
+ 
+ using android::linkerconfig::modules::Namespace;
+ 
+@@ -51,6 +52,15 @@ Namespace BuildSphalNamespace([[maybe_unused]] const Context& ctx) {
+   ns.AddPermittedPath("/vendor/odm/${LIB}");
+   ns.AddPermittedPath("/system/vendor/${LIB}");
+ 
++  // Mako predates the vendor/system HAL split. Its gralloc module is in
++  // /system/lib/hw and uses the platform display dependency family.
++  if (android::base::GetProperty("ro.product.device", "") == "mako") {
++    ns.AddPermittedPath("/system/${LIB}/hw");
++    ns.GetLink(ctx.GetSystemNamespaceName()).AddSharedLib(
++        "libmemalloc.so:liboverlay.so:libqdutils.so:libhardware.so:"
++        "libutils.so:libcutils.so:libc++.so");
++  }
++
+   // TODO(b/326839235) Remove access to data once renderscript is deprecated.
+   if (!android::linkerconfig::modules::IsVendorVndkVersionDefined()) {
+     ns.AddPermittedPath("/data");
+diff --git a/contents/namespace/vendordefault.cc b/contents/namespace/vendordefault.cc
+index a866839fb77c18c5de94df569c4f10d742b3a05c..b072ae8a99fbc4722561601f0dc36c55a539ca12 100644
+--- a/contents/namespace/vendordefault.cc
++++ b/contents/namespace/vendordefault.cc
+@@ -20,6 +20,7 @@
+ #include "linkerconfig/namespacebuilder.h"
+ 
+ #include <android-base/strings.h>
++#include <android-base/properties.h>
+ 
+ #include "linkerconfig/common.h"
+ #include "linkerconfig/environment.h"
+@@ -45,9 +46,31 @@ Namespace BuildVendorNamespace([[maybe_unused]] const Context& ctx,
+   ns.AddSearchPath("/vendor/${LIB}/hw");
+   ns.AddSearchPath("/vendor/${LIB}/egl");
+ 
++  // Keep platform dependencies in the system namespace. Searching /system/lib
++  // here would load libbinder_ndk against the vendor libbinder (/dev/vndbinder).
++  if (android::base::GetProperty("ro.product.device", "") == "mako") {
++    ns.GetLink(ctx.GetSystemNamespaceName()).AddSharedLib(
++        "libmemalloc.so", "liboverlay.so", "libqdutils.so", "libhardware.so",
++        "libexternal.so", "libqservice.so");
++  }
++
+   ns.AddPermittedPath("/odm");
+   ns.AddPermittedPath("/vendor");
+   ns.AddPermittedPath("/system/vendor");
++  // mako legacy camera HAL (camera.mako.so) lives in /system/lib/hw and
++  // links platform libraries (libcamera_client, libmedia, ...).
++  ns.AddPermittedPath("/system/${LIB}/hw");
++  auto& system_link = ns.GetLink(ctx.GetSystemNamespaceName());
++  for (const std::string& lib : {"libcamera_client.so", "libmedia.so",
++                                 "libcamera_metadata.so", "libui.so",
++                                 "libutils.so", "liblog.so", "libcutils.so",
++                                 "libbinder.so", "libnativewindow.so",
++                                 "libgenlock.so", "libmmcamera_interface.so",
++                                 "libc++.so", "android.hidl.token@1.0-utils.so",
++                                 "android.hardware.graphics.bufferqueue@1.0.so",
++                                 "android.hardware.graphics.bufferqueue@2.0.so"}) {
++    system_link.AddSharedLib(lib);
++  }
+ 
+   ns.GetLink("rs").AddSharedLib("libRS_internal.so");
+   ns.AddRequires(base::Split(Var("LLNDK_LIBRARIES_VENDOR", ""), ":"));
