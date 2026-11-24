@@ -1,0 +1,23 @@
+diff --git a/src/com/android/settings/applications/manageapplications/ManageApplicationsUtil.kt b/src/com/android/settings/applications/manageapplications/ManageApplicationsUtil.kt
+index 26d71c415e96a9f461ec7a5952d2c3a9ee2611d6..a10d2b61ce1d769a137b2f8ba1692e822e8130eb 100644
+--- a/src/com/android/settings/applications/manageapplications/ManageApplicationsUtil.kt
++++ b/src/com/android/settings/applications/manageapplications/ManageApplicationsUtil.kt
+@@ -16,6 +16,7 @@
+ 
+ package com.android.settings.applications.manageapplications
+ 
++import android.app.ActivityManager
+ import android.content.Context
+ import android.util.FeatureFlagUtils
+ import com.android.settings.Settings.AlarmsAndRemindersActivity
+@@ -116,6 +117,10 @@ object ManageApplicationsUtil {
+         if (!FeatureFlagUtils.isEnabled(context, FeatureFlagUtils.SETTINGS_ENABLE_SPA)) {
+             return null
+         }
++        // The installed-app list has a RecyclerView implementation for low-RAM devices.
++        if (listType == LIST_TYPE_MAIN && ActivityManager.isLowRamDeviceStatic()) {
++            return null
++        }
+         return when (listType) {
+             LIST_TYPE_OVERLAY -> DisplayOverOtherAppsAppListProvider.getAppListRoute()
+             LIST_TYPE_WRITE_SETTINGS -> ModifySystemSettingsAppListProvider.getAppListRoute()
