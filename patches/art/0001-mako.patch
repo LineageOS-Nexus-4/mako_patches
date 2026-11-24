@@ -1,0 +1,56 @@
+diff --git a/libartbase/base/memfd.cc b/libartbase/base/memfd.cc
+index f965a08780421523a214040f57226b33d0e0216f..3f19ed1a92c16a1aeefa05e4566427b9152e5f9b 100644
+--- a/libartbase/base/memfd.cc
++++ b/libartbase/base/memfd.cc
+@@ -27,6 +27,9 @@
+ #endif
+ 
+ #include <android-base/logging.h>
++#if defined(__ANDROID__)
++#include <android-base/properties.h>
++#endif
+ #include <android-base/unique_fd.h>
+ 
+ #include "macros.h"
+@@ -44,7 +47,19 @@ int memfd_create(const char* name, unsigned int flags) {
+   int major, minor;
+   if (uname(&uts) != 0 ||
+       strcmp(uts.sysname, "Linux") != 0 ||
+-      sscanf(uts.release, "%d.%d", &major, &minor) != 2 ||
++      sscanf(uts.release, "%d.%d", &major, &minor) != 2) {
++    errno = ENOSYS;
++    return -1;
++  }
++
++  bool has_memfd_backport = false;
++#if defined(__ANDROID__)
++  // Products with a memfd backport can opt in on older kernels.
++  static const bool kHasMemfdBackport =
++      android::base::GetBoolProperty("ro.dalvik.vm.memfd_backport", false);
++  has_memfd_backport = kHasMemfdBackport;
++#endif
++  if (!has_memfd_backport &&
+       (major < kRequiredMajor || (major == kRequiredMajor && minor < kRequiredMinor))) {
+     errno = ENOSYS;
+     return -1;
+diff --git a/runtime/jit/jit_code_cache.cc b/runtime/jit/jit_code_cache.cc
+index b6e25f877a7d1b8f628965d399dfc8d606e6d524..a4f93a77ad74c49b65bdab5a518549ae66c4b520 100644
+--- a/runtime/jit/jit_code_cache.cc
++++ b/runtime/jit/jit_code_cache.cc
+@@ -1915,6 +1915,7 @@ void JitCodeCache::DumpAllCompiledMethods(std::ostream& os) {
+ }
+ 
+ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
++  (void)is_system_server;
+   Thread* self = Thread::Current();
+ 
+   // Remove potential tasks that have been inherited from the zygote.
+@@ -1954,7 +1955,7 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
+   std::string error_msg;
+   if (!private_region_.Initialize(initial_capacity,
+                                   max_capacity,
+-                                  /* rwx_memory_allowed= */ !is_system_server,
++                                  /* rwx_memory_allowed= */ true,
+                                   is_zygote,
+                                   &error_msg)) {
+     LOG(FATAL) << "Could not create private region after zygote fork: " << error_msg;
