@@ -1,0 +1,15 @@
+diff --git a/Android.bp b/Android.bp
+index e57d86eff8aaee4196c7efae8a521c9941e0e77d..d07e33f06fe4bb2cdcc44583f29e58dfe0895690 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -862,6 +862,10 @@ cc_prebuilt_library_shared {
+ 
+ cc_prebuilt_library_shared {
+     name: "libprotobuf-cpp-lite-v29",
++    enabled: select(soong_config_variable("mako", "use_device_protobuf_v29"), {
++        true: false,
++        default: true,
++    }),
+     vendor: true,
+     strip: {
+         none: true,
