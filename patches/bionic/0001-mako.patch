@@ -1,0 +1,19 @@
+diff --git a/linker/linker.cpp b/linker/linker.cpp
+index 29e67ce3a9e65fa4eacda2e107b78895f6e58bab..d4cb58b43111e7c46a14272bf434d8db0faec701 100644
+--- a/linker/linker.cpp
++++ b/linker/linker.cpp
+@@ -3385,10 +3385,11 @@ bool soinfo::link_image(const SymbolLookupList& lookup_list, soinfo* local_group
+   }
+ 
+ #if !defined(__LP64__)
++  // Text relocations are required by legacy 32-bit mako binaries (e.g.
++  // mm-qcamera-daemon) that write to their .text during relocation. The
++  // unprotect is required so those writes land on writable pages; the
++  // segments are re-protected below.
+   if (has_text_relocations) {
+-    if (DL_ERROR_AFTER(23, "\"%s\" has text relocations", get_realpath())) {
+-      return false;
+-    }
+     add_dlwarning(get_realpath(), "text relocations");
+     // Make segments writable to allow text relocations to work properly. We will later call
+     // phdr_table_protect_segments() after all of them are applied.
