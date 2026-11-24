@@ -1,0 +1,50 @@
+diff --git a/server/BandwidthController.cpp b/server/BandwidthController.cpp
+index 8a9673874aadc0b069ead63c49f54e5026f28f04..97820053839c030b9707dab560d35ae6ecd83470 100644
+--- a/server/BandwidthController.cpp
++++ b/server/BandwidthController.cpp
+@@ -30,6 +30,8 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <string>
++#include <algorithm>
++#include <unistd.h>
+ #include <vector>
+ 
+ #include <sys/socket.h>
+@@ -252,6 +254,20 @@ std::vector<std::string> getBasicAccountingCommands() {
+             ("-A bw_mangle_POSTROUTING -m bpf --object-pinned " XT_BPF_EGRESS_PROG_PATH),
+             COMMIT_AND_CLOSE};
+     // clang-format on
++    // Without the pinned ingress program,
++    // xt_bpf rules cannot be installed. Retain the ordinary iptables rules;
++    // BPF UID filtering/accounting remains unavailable in this mode.
++    if (access(XT_BPF_INGRESS_PROG_PATH, F_OK) != 0) {
++        ipt_basic_accounting_commands.erase(
++                std::remove_if(ipt_basic_accounting_commands.begin(),
++                               ipt_basic_accounting_commands.end(),
++                               [](const std::string& command) {
++                                   return command.find("-m bpf --object-pinned ") !=
++                                          std::string::npos;
++                               }),
++                ipt_basic_accounting_commands.end());
++        ALOGW("BPF accounting programs unavailable; using basic iptables rules only");
++    }
+     return ipt_basic_accounting_commands;
+ }
+ 
+diff --git a/server/main.cpp b/server/main.cpp
+index d27fd76a31634a815c4569c3e007db770b2baab7..f9ba9303c79c7af54f07d3be4fd2703b71b0e704 100644
+--- a/server/main.cpp
++++ b/server/main.cpp
+@@ -136,8 +136,9 @@ int main() {
+ 
+     std::string cg2_path;
+     if (!CgroupGetControllerPath(CGROUPV2_HIERARCHY_NAME, &cg2_path)) {
+-        ALOGE("Failed to find cgroup v2 root %s", strerror(errno));
+-        exit(1);
++        // Use legacy networking on kernels without cgroup v2 and BPF maps.
++        ALOGW("No cgroup v2 root (%s); continuing in legacy mode", strerror(errno));
++        cg2_path = "/sys/fs/cgroup";
+     }
+ 
+     if (libnetd_updatable_init(cg2_path.c_str())) {
