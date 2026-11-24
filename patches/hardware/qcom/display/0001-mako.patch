@@ -1,0 +1,414 @@
+diff --git a/msm8960/Android.bp b/msm8960/Android.bp
+new file mode 100644
+index 0000000000000000000000000000000000000000..536d9e8d8a50266d46d4d9c169f44a994ab5e9df
+--- /dev/null
++++ b/msm8960/Android.bp
+@@ -0,0 +1,16 @@
++soong_namespace {
++}
++
++// SurfaceFlinger consumes the legacy gralloc private ABI on mako. Keep the
++// interface scoped to the msm8960 namespace instead of exposing every old HAL.
++cc_library_headers {
++    name: "display_intf_headers",
++    vendor_available: true,
++    export_include_dirs: [
++        "libgralloc",
++        "libqdutils",
++        "libqservice",
++    ],
++    header_libs: ["libhardware_headers"],
++    export_header_lib_headers: ["libhardware_headers"],
++}
+diff --git a/msm8960/libcopybit/Android.mk b/msm8960/libcopybit/Android.mk
+index b30e977dd70916fdb5414f3cdff4645d95020a0e..343ec8e29067da13abff763531e23fdfba9260d4 100644
+--- a/msm8960/libcopybit/Android.mk
++++ b/msm8960/libcopybit/Android.mk
+@@ -15,20 +15,15 @@
+ LOCAL_PATH:= $(call my-dir)
+ include $(LOCAL_PATH)/../common.mk
+ 
+-include $(CLEAR_VARS)
+-LOCAL_COPY_HEADERS_TO         := $(common_header_export_path)
+-LOCAL_COPY_HEADERS            := copybit.h copybit_priv.h c2d2.h
+-include $(BUILD_COPY_HEADERS)
+-
+ include $(CLEAR_VARS)
+ LOCAL_MODULE                  := copybit.$(TARGET_BOARD_PLATFORM)
+ LOCAL_LICENSE_KINDS           := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD legacy_not_a_contribution
+ LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
+ LOCAL_NOTICE_FILE             := $(LOCAL_PATH)/NOTICE
+ LOCAL_MODULE_RELATIVE_PATH    := hw
+-LOCAL_PROPRIETARY_MODULE      := true
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libdl libmemalloc
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdcopybit\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+diff --git a/msm8960/libexternal/Android.mk b/msm8960/libexternal/Android.mk
+index 7ce8c843ced0ec44df02ff9109ba972b0f9b6351..3cd75d18bb709b3ec9bac587c8a692909203ce8b 100644
+--- a/msm8960/libexternal/Android.mk
++++ b/msm8960/libexternal/Android.mk
+@@ -8,6 +8,7 @@ LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
+ LOCAL_MODULE_PATH             := $(TARGET_OUT_SHARED_LIBRARIES)
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) liboverlay libmedia
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdexternal\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+diff --git a/msm8960/libexternal/external.cpp b/msm8960/libexternal/external.cpp
+index 01c09242a9927eef84ea6cd8bd7d013747bcefa5..d3fca3a8ab10696005c45b490c8422e8ce75fc7c 100644
+--- a/msm8960/libexternal/external.cpp
++++ b/msm8960/libexternal/external.cpp
+@@ -21,8 +21,6 @@
+ #define DEBUG 0
+ #include <ctype.h>
+ #include <fcntl.h>
+-#include <media/IAudioPolicyService.h>
+-#include <media/AudioSystem.h>
+ #include <utils/threads.h>
+ #include <utils/Errors.h>
+ #include <utils/Log.h>
+@@ -576,6 +574,7 @@ bool ExternalDisplay::isInterlacedMode(int ID) {
+         case m1440x576i50_16_9:
+         case m1920x1080i60_16_9:
+             interlaced = true;
++            break;
+         default:
+             interlaced = false;
+     }
+diff --git a/msm8960/libgenlock/Android.mk b/msm8960/libgenlock/Android.mk
+index f03744af6e3f0aeba49ed50cfd212030e321dfab..047810f41f886fb54e75c6685f2835a1738f03e7 100644
+--- a/msm8960/libgenlock/Android.mk
++++ b/msm8960/libgenlock/Android.mk
+@@ -7,6 +7,7 @@ LOCAL_LICENSE_KINDS           := SPDX-license-identifier-BSD
+ LOCAL_LICENSE_CONDITIONS      := notice
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := liblog libcutils
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdgenlock\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+diff --git a/msm8960/libgralloc/Android.mk b/msm8960/libgralloc/Android.mk
+index 9ba838f25f4531b8c63b031ea523e35a11a7bcc0..ef967ab8e463b9668e506b4f07cb57d4b8f3ef31 100644
+--- a/msm8960/libgralloc/Android.mk
++++ b/msm8960/libgralloc/Android.mk
+@@ -22,17 +22,14 @@ LOCAL_LICENSE_KINDS           := SPDX-license-identifier-Apache-2.0 SPDX-license
+ LOCAL_LICENSE_CONDITIONS      := notice
+ LOCAL_NOTICE_FILE             := $(LOCAL_PATH)/NOTICE
+ LOCAL_MODULE_RELATIVE_PATH    := hw
+-LOCAL_PROPRIETARY_MODULE      := true
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libmemalloc
+ LOCAL_SHARED_LIBRARIES        += libqdutils libGLESv1_CM
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdgralloc\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps) $(kernel_deps)
+ LOCAL_SRC_FILES               := gpu.cpp gralloc.cpp framebuffer.cpp mapper.cpp
+-LOCAL_COPY_HEADERS_TO         := $(common_header_export_path)
+-LOCAL_COPY_HEADERS            := gralloc_priv.h
+-
+ include $(BUILD_SHARED_LIBRARY)
+ 
+ # MemAlloc Library
+@@ -44,6 +41,7 @@ LOCAL_LICENSE_CONDITIONS      := notice
+ LOCAL_NOTICE_FILE             := $(LOCAL_PATH)/NOTICE
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libqdutils libdl
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdmemalloc\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps) $(kernel_deps)
+diff --git a/msm8960/libgralloc/ionalloc.cpp b/msm8960/libgralloc/ionalloc.cpp
+index a49934e22fac4874573da086f3f863243908525b..01684ca0ab8cdf9d04999669833057d50690e37c 100644
+--- a/msm8960/libgralloc/ionalloc.cpp
++++ b/msm8960/libgralloc/ionalloc.cpp
+@@ -73,7 +73,7 @@ int IonAlloc::alloc_buffer(alloc_data& data)
+ 
+     ionAllocData.len = data.size;
+     ionAllocData.align = data.align;
+-    ionAllocData.heap_id_mask = data.flags & ~ION_SECURE;
++    ionAllocData.heap_mask = data.flags & ~ION_SECURE;
+     ionAllocData.flags = data.uncached ? 0 : ION_FLAG_CACHED;
+     // ToDo: replace usage of alloc data structure with
+     //  ionallocdata structure.
+diff --git a/msm8960/libgralloc/mapper.cpp b/msm8960/libgralloc/mapper.cpp
+index f2d6e23031a9f886eed6fb32ef8bfc6753f6e053..eb24ae1b8deb57d5082514112ef17f522952222b 100644
+--- a/msm8960/libgralloc/mapper.cpp
++++ b/msm8960/libgralloc/mapper.cpp
+@@ -252,9 +252,20 @@ int gralloc_lock_ycbcr(gralloc_module_t const* module,
+     int err = gralloc_map_and_invalidate(module, handle, usage, l, t, w, h);
+     int ystride, cstride;
+     if(!err) {
+-        //hnd->format holds our implementation defined format
+-        //HAL_PIXEL_FORMAT_YCrCb_420_SP is the only one set right now.
++        // hnd->format holds the concrete implementation-defined layout.
+         switch (hnd->format) {
++            case HAL_PIXEL_FORMAT_NV12_ENCODEABLE:
++                // Match getBufferSizeAndDimensions(): the msm8960 encoder
++                // needs the UV plane at a 2K-aligned offset, unlike plain NV12.
++                ystride = ALIGN(hnd->width, 16);
++                ycbcr->y  = (void*)hnd->base;
++                ycbcr->cb = (void*)(hnd->base + ALIGN(ystride * hnd->height, 2048));
++                ycbcr->cr = (void*)(hnd->base + ALIGN(ystride * hnd->height, 2048) + 1);
++                ycbcr->ystride = ystride;
++                ycbcr->cstride = ystride;
++                ycbcr->chroma_step = 2;
++                memset(ycbcr->reserved, 0, sizeof(ycbcr->reserved));
++                break;
+             case HAL_PIXEL_FORMAT_YCrCb_420_SP:
+                 ystride = ALIGN(hnd->width, 16);
+                 ycbcr->y  = (void*)hnd->base;
+diff --git a/msm8960/libhwcomposer/Android.mk b/msm8960/libhwcomposer/Android.mk
+index 715d23da47be24ae68dc1e74a95a486cfa392555..2345a0e2b51cde47839d82ff26ffaf1e54f3503f 100644
+--- a/msm8960/libhwcomposer/Android.mk
++++ b/msm8960/libhwcomposer/Android.mk
+@@ -6,9 +6,9 @@ LOCAL_MODULE                  := hwcomposer.$(TARGET_BOARD_PLATFORM)
+ LOCAL_LICENSE_KINDS           := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD legacy_not_a_contribution
+ LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
+ LOCAL_MODULE_RELATIVE_PATH    := hw
+-LOCAL_PROPRIETARY_MODULE      := true
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libEGL liboverlay \
+                                  libexternal libqdutils libhardware_legacy \
+                                  libdl libmemalloc libqservice libsync \
+diff --git a/msm8960/libhwcomposer/hwc.cpp b/msm8960/libhwcomposer/hwc.cpp
+index f856173565bac3db4221f9bb2ba7b066f5b18c32..403c072bc2051c87ca86886bd058b0d9b2f78bbf 100644
+--- a/msm8960/libhwcomposer/hwc.cpp
++++ b/msm8960/libhwcomposer/hwc.cpp
+@@ -83,10 +83,10 @@ static void hwc_registerProcs(struct hwc_composer_device_1* dev,
+ }
+ 
+ //Helper
+-static void reset(hwc_context_t *ctx, int numDisplays,
++static void reset(hwc_context_t *ctx, size_t numDisplays,
+                   hwc_display_contents_1_t** displays) {
+-    for(int i = 0; i < MAX_DISPLAYS; i++) {
+-        hwc_display_contents_1_t *list = displays[i];
++    for (size_t i = 0; i < MAX_DISPLAYS; i++) {
++        hwc_display_contents_1_t *list = i < numDisplays ? displays[i] : nullptr;
+         // XXX:SurfaceFlinger no longer guarantees that this
+         // value is reset on every prepare. However, for the layer
+         // cache we need to reset it.
+@@ -583,7 +583,7 @@ void hwc_dump(struct hwc_composer_device_1* dev, char *buff, int buff_len)
+     ovDump[0] = '\0';
+     ctx->mRotMgr->getDump(ovDump, 2048);
+     dumpsys_log(aBuf, ovDump);
+-    strlcpy(buff, aBuf.string(), buff_len);
++    strlcpy(buff, aBuf.c_str(), buff_len);
+ }
+ 
+ static int hwc_device_close(struct hw_device_t *dev)
+diff --git a/msm8960/libhwcomposer/hwc_mdpcomp.cpp b/msm8960/libhwcomposer/hwc_mdpcomp.cpp
+index 939a786943de88c257b9757d81685b5661ce4df4..b541b40a2d0eef00ad7a56a9cba872e5c176828f 100644
+--- a/msm8960/libhwcomposer/hwc_mdpcomp.cpp
++++ b/msm8960/libhwcomposer/hwc_mdpcomp.cpp
+@@ -321,6 +321,7 @@ ovutils::eDest MDPComp::getMdpPipe(hwc_context_t *ctx, ePipeType type) {
+             ctx->mDMAInUse = true;
+             return mdp_pipe;
+         }
++        [[fallthrough]];
+     case MDPCOMP_OV_ANY:
+     case MDPCOMP_OV_RGB:
+         mdp_pipe = ov.nextPipe(ovutils::OV_MDP_PIPE_RGB, mDpy);
+@@ -332,6 +333,7 @@ ovutils::eDest MDPComp::getMdpPipe(hwc_context_t *ctx, ePipeType type) {
+             //Requested only for RGB pipe
+             break;
+         }
++        [[fallthrough]];
+     case  MDPCOMP_OV_VG:
+         return ov.nextPipe(ovutils::OV_MDP_PIPE_VG, mDpy);
+     default:
+@@ -797,7 +799,7 @@ int MDPComp::prepare(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
+         ALOGD("GEOMETRY change: %d", (list->flags & HWC_GEOMETRY_CHANGED));
+         android::String8 sDump("");
+         dump(sDump);
+-        ALOGE("%s",sDump.string());
++        ALOGE("%s",sDump.c_str());
+     }
+ 
+     return mCurrentFrame.fbZ;
+diff --git a/msm8960/libhwcomposer/hwc_utils.cpp b/msm8960/libhwcomposer/hwc_utils.cpp
+index 234321a2fc57885675f845aa9762a56601f84476..7094b8913361464063a32ebc47d578edf078c392 100644
+--- a/msm8960/libhwcomposer/hwc_utils.cpp
++++ b/msm8960/libhwcomposer/hwc_utils.cpp
+@@ -19,7 +19,6 @@
+  */
+ #define HWC_UTILS_DEBUG 0
+ #include <sys/ioctl.h>
+-#include <binder/IServiceManager.h>
+ #include <EGL/egl.h>
+ #include <cutils/properties.h>
+ #include <gralloc_priv.h>
+@@ -240,13 +239,9 @@ void initContext(hwc_context_t *ctx)
+     ctx->mExtDispConfiguring = false;
+     ctx->mBasePipeSetup = false;
+ 
+-    //Right now hwc starts the service but anybody could do it, or it could be
+-    //independent process as well.
+-    QService::init();
+-    sp<IQClient> client = new QClient(ctx);
+-    interface_cast<IQService>(
+-            defaultServiceManager()->getService(
+-            String16("display.qservice")))->connect(client);
++    // The composer and QService share a process. Wire the callback locally,
++    // since the vendor and system libraries can use different Binder drivers.
++    QService::init(new QClient(ctx));
+ 
+     ALOGI("Initializing Qualcomm Hardware Composer");
+     ALOGI("MDP version: %d", ctx->mMDP.version);
+@@ -666,7 +661,6 @@ int hwc_sync(hwc_context_t *ctx, hwc_display_contents_1_t* list, int dpy,
+     }
+     data.acq_fen_fd = acquireFd;
+     data.rel_fen_fd = &releaseFd;
+-    data.retire_fen_fd = &retireFd;
+ 
+ #ifdef DEBUG_SWAPINTERVAL
+     char property[PROPERTY_VALUE_MAX];
+diff --git a/msm8960/liblight/Android.mk b/msm8960/liblight/Android.mk
+index 061cf5188e114e3723ef7b0a3fab150415ccd872..520f3cc05f593dfdad6a8323871a913fff5c701e 100644
+--- a/msm8960/liblight/Android.mk
++++ b/msm8960/liblight/Android.mk
+@@ -19,7 +19,6 @@ include $(CLEAR_VARS)
+ 
+ LOCAL_SRC_FILES := lights.c
+ LOCAL_MODULE_RELATIVE_PATH := hw
+-LOCAL_PROPRIETARY_MODULE := true
+ LOCAL_SHARED_LIBRARIES := liblog
+ LOCAL_CFLAGS := $(common_flags) -DLOG_TAG=\"qdlights\"
+ LOCAL_MODULE := lights.$(TARGET_BOARD_PLATFORM)
+diff --git a/msm8960/libmemtrack/Android.mk b/msm8960/libmemtrack/Android.mk
+index 9718a8d5097d159bdbc0a7f5790c9adea4291a2d..1f5d11604c01338caaa40c389a4bc56f8825208c 100644
+--- a/msm8960/libmemtrack/Android.mk
++++ b/msm8960/libmemtrack/Android.mk
+@@ -19,8 +19,8 @@ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+ LOCAL_MODULE_RELATIVE_PATH := hw
+-LOCAL_PROPRIETARY_MODULE := true
+ LOCAL_C_INCLUDES += hardware/libhardware/include
++LOCAL_HEADER_LIBRARIES := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES := liblog
+ LOCAL_SRC_FILES := memtrack_msm.c kgsl.c
+ LOCAL_MODULE := memtrack.msm8960
+diff --git a/msm8960/liboverlay/Android.mk b/msm8960/liboverlay/Android.mk
+index 4ea5b7ea9e89b45a8348f4e2c8bd5d46902cd80b..8334bb3d5b19de40079444f032e7c1123dd5d07c 100644
+--- a/msm8960/liboverlay/Android.mk
++++ b/msm8960/liboverlay/Android.mk
+@@ -8,6 +8,7 @@ LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
+ LOCAL_MODULE_PATH             := $(TARGET_OUT_SHARED_LIBRARIES)
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libqdutils libmemalloc libsync
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdoverlay\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+diff --git a/msm8960/libqdutils/Android.mk b/msm8960/libqdutils/Android.mk
+index 9c80b12aac2f69d80c4b56fc1f2ab2da8734b46b..1c180d3f2f9ffea26a6da100cfd13675ec02c420 100644
+--- a/msm8960/libqdutils/Android.mk
++++ b/msm8960/libqdutils/Android.mk
+@@ -8,6 +8,7 @@ LOCAL_LICENSE_CONDITIONS      := notice
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_SHARED_LIBRARIES        := $(common_libs)
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdutils\"
+ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+ LOCAL_SRC_FILES               := profiler.cpp mdp_version.cpp \
+@@ -17,11 +18,10 @@ include $(BUILD_SHARED_LIBRARY)
+ 
+ include $(CLEAR_VARS)
+ 
+-LOCAL_COPY_HEADERS_TO           := $(common_header_export_path)
+-LOCAL_COPY_HEADERS              := qdMetaData.h
+ LOCAL_MODULE_PATH               := $(TARGET_OUT_SHARED_LIBRARIES)
+ LOCAL_SHARED_LIBRARIES          := liblog libcutils
+ LOCAL_C_INCLUDES                := $(common_includes)
++LOCAL_HEADER_LIBRARIES          := generated_kernel_headers
+ LOCAL_ADDITIONAL_DEPENDENCIES   := $(common_deps)
+ LOCAL_SRC_FILES                 := qdMetaData.cpp
+ LOCAL_CFLAGS                    := $(common_flags)
+diff --git a/msm8960/libqservice/Android.mk b/msm8960/libqservice/Android.mk
+index ecf031b5407caa3587cf523e6baa29d02dd6b290..2830053e5f5f2f1a1790b44ab772495866150b24 100644
+--- a/msm8960/libqservice/Android.mk
++++ b/msm8960/libqservice/Android.mk
+@@ -8,6 +8,7 @@ LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
+ LOCAL_MODULE_PATH             := $(TARGET_OUT_SHARED_LIBRARIES)
+ LOCAL_MODULE_TAGS             := optional
+ LOCAL_C_INCLUDES              := $(common_includes) $(kernel_includes)
++LOCAL_HEADER_LIBRARIES        := generated_kernel_headers
+ LOCAL_SHARED_LIBRARIES        := $(common_libs) libexternal libbinder
+ LOCAL_CFLAGS                  := $(common_flags) -DLOG_TAG=\"qdqservice\"
+ LOCAL_CFLAGS                  += -Wno-error
+@@ -15,9 +16,4 @@ LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
+ LOCAL_SRC_FILES               := QService.cpp \
+                                  IQService.cpp \
+                                  IQClient.cpp
+-LOCAL_COPY_HEADERS_TO         := $(common_header_export_path)
+-LOCAL_COPY_HEADERS            := IQService.h \
+-                                 IQClient.h
+-
+-
+ include $(BUILD_SHARED_LIBRARY)
+diff --git a/msm8960/libqservice/QService.cpp b/msm8960/libqservice/QService.cpp
+index 54e285c4d3734ba89e7b2c63d8b8a34dfcd91773..4d54c7e85c16667a214d7206a1a1e34d27ca408d 100644
+--- a/msm8960/libqservice/QService.cpp
++++ b/msm8960/libqservice/QService.cpp
+@@ -35,7 +35,6 @@ using namespace android;
+ 
+ namespace qService {
+ 
+-QService* QService::sQService = NULL;
+ // ----------------------------------------------------------------------------
+ QService::QService()
+ {
+@@ -71,16 +70,19 @@ android::status_t QService::screenRefresh() {
+     return result;
+ }
+ 
+-void QService::init()
++void QService::init(const sp<qClient::IQClient>& client)
+ {
+-    if(!sQService) {
+-        sQService = new QService();
++    static sp<QService> service;
++    if (!service) {
++        service = new QService();
++        service->connect(client);
+         sp<IServiceManager> sm = defaultServiceManager();
+-        sm->addService(String16("display.qservice"), sQService);
+-        if(sm->checkService(String16("display.qservice")) != NULL)
+-            ALOGD_IF(QSERVICE_DEBUG, "adding display.qservice succeeded");
+-        else
+-            ALOGD_IF(QSERVICE_DEBUG, "adding display.qservice failed");
++        const status_t status = sm->addService(String16("display.qservice"), service);
++        if (status != OK) {
++            ALOGE("Failed to add display.qservice: %d", status);
++        }
++    } else {
++        service->connect(client);
+     }
+ }
+ 
+diff --git a/msm8960/libqservice/QService.h b/msm8960/libqservice/QService.h
+index 268bf8113d1106d3dcff4de58031a1fb69d4529f..f02e7eaab55fb67f57c9be6744b082d1f41e917c 100644
+--- a/msm8960/libqservice/QService.h
++++ b/msm8960/libqservice/QService.h
+@@ -49,11 +49,10 @@ public:
+     virtual void unsecuring(uint32_t startEnd);
+     virtual void connect(const android::sp<qClient::IQClient>& client);
+     virtual android::status_t screenRefresh();
+-    static void init();
++    static void init(const android::sp<qClient::IQClient>& client);
+ private:
+     QService();
+     android::sp<qClient::IQClient> mClient;
+-    static QService *sQService;
+ };
+ }; // namespace qService
+ #endif // ANDROID_QSERVICE_H
