@@ -1,0 +1,53 @@
+diff --git a/libs/renderengine/skia/compat/GaneshGpuContext.cpp b/libs/renderengine/skia/compat/GaneshGpuContext.cpp
+index 931f8433da144b1e0aacffed0b3a10a7040ba6b4..d639bc5cb0b24d0040d42e09dc345f03a5045676 100644
+--- a/libs/renderengine/skia/compat/GaneshGpuContext.cpp
++++ b/libs/renderengine/skia/compat/GaneshGpuContext.cpp
+@@ -28,12 +28,14 @@
+ #include <include/gpu/vk/VulkanBackendContext.h>
+ 
+ #include "../AutoBackendTexture.h"
++#include "../GLExtensions.h"
+ #include "GaneshBackendTexture.h"
+ #include "skia/compat/SkiaBackendTexture.h"
+ 
+ #include <android-base/macros.h>
+ #include <log/log_main.h>
+ #include <memory>
++#include <string_view>
+ 
+ namespace android::renderengine::skia {
+ 
+@@ -51,8 +53,17 @@ static GrContextOptions ganeshOptions(GrContextOptions::PersistentCache& skSLCac
+ std::unique_ptr<SkiaGpuContext> SkiaGpuContext::MakeGL_Ganesh(
+         sk_sp<const GrGLInterface> glInterface,
+         GrContextOptions::PersistentCache& skSLCacheMonitor) {
+-    return std::make_unique<GaneshGpuContext>(
+-            GrDirectContexts::MakeGL(glInterface, ganeshOptions(skSLCacheMonitor)));
++    GrContextOptions options = ganeshOptions(skSLCacheMonitor);
++    if (std::string_view(GLExtensions::getInstance().getRenderer()) == "Adreno (TM) 320" &&
++        glInterface->hasExtension("GL_OES_EGL_image_external") &&
++        !glInterface->hasExtension("GL_OES_EGL_image_external_essl3") &&
++        !glInterface->hasExtension("OES_EGL_image_external_essl3")) {
++        // The legacy Adreno driver can sample decoder buffers as ES2 external
++        // images. Keep that path available for Ganesh client composition.
++        options.fDisableDriverCorrectnessWorkarounds = false;
++        options.fPreferExternalImagesOverES3 = true;
++    }
++    return std::make_unique<GaneshGpuContext>(GrDirectContexts::MakeGL(glInterface, options));
+ }
+ 
+ std::unique_ptr<SkiaGpuContext> SkiaGpuContext::MakeVulkan_Ganesh(
+diff --git a/services/surfaceflinger/Android.bp b/services/surfaceflinger/Android.bp
+index d39f7ad0f6e4c3951939781bcb53beed6c586d92..069484e5e431346a0b089ad8a1921b821659f79c 100644
+--- a/services/surfaceflinger/Android.bp
++++ b/services/surfaceflinger/Android.bp
+@@ -56,6 +56,9 @@ cc_defaults {
+         "-DEGL_EGLEXT_PROTOTYPES",
+         "-DGL_GLEXT_PROTOTYPES",
+     ] + select(soong_config_variable("qtidisplay", "headers_namespace"), {
++        // Pre-UM gralloc has no PRIVATE_WFD usage bit. Keep the generic
++        // virtual-display path; HWC still reports its actual capabilities.
++        "hardware/qcom/display/msm8960": [],
+         any @ flag_val: ["-DQCOM_UM_FAMILY"],
+         default: [],
+     }),
