@@ -1,0 +1,27 @@
+diff --git a/tools/releasetools/ota_from_target_files.py b/tools/releasetools/ota_from_target_files.py
+index 90716e332388c0af8362bea749dbfbe2c236003b..ffbe4b2491f5d8d6134ef447dff228df097b1089 100755
+--- a/tools/releasetools/ota_from_target_files.py
++++ b/tools/releasetools/ota_from_target_files.py
+@@ -574,7 +574,12 @@ def ModifyTargetFilesDynamicPartitionInfo(input_file, key, value):
+   Returns:
+     The path to modified target-files.zip
+   """
++  # mako bring-up: devices without dynamic partitions have no
++  # META/dynamic_partitions_info.txt; nothing to modify.
+   if os.path.isdir(input_file):
++    if not os.path.exists(os.path.join(
++        input_file, *DYNAMIC_PARTITION_INFO.split("/"))):
++      return input_file
+     dynamic_partition_info_path = os.path.join(
+         input_file, *DYNAMIC_PARTITION_INFO.split("/"))
+     with open(dynamic_partition_info_path, "r") as fp:
+@@ -585,6 +590,9 @@ def ModifyTargetFilesDynamicPartitionInfo(input_file, key, value):
+       fp.write(dynamic_partition_info)
+     return input_file
+ 
++  with zipfile.ZipFile(input_file, 'r', allowZip64=True) as zfp:
++    if DYNAMIC_PARTITION_INFO not in zfp.namelist():
++      return input_file
+   target_file = common.MakeTempFile(prefix="targetfiles-", suffix=".zip")
+   shutil.copyfile(input_file, target_file)
+   common.ZipDelete(target_file, DYNAMIC_PARTITION_INFO)
