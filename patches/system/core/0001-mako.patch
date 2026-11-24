@@ -1,0 +1,328 @@
+diff --git a/libcutils/ashmem-dev.cpp b/libcutils/ashmem-dev.cpp
+index 08746556dc009da694594c7e8bcd849859921df9..8039cc7bf8f1b74be5d5010872b27614a0fe5669 100644
+--- a/libcutils/ashmem-dev.cpp
++++ b/libcutils/ashmem-dev.cpp
+@@ -200,7 +200,11 @@ static bool is_memfd_fd(int fd) {
+     std::string fd_path = android::base::StringPrintf("/proc/self/fd/%d", fd);
+     std::string result;
+     if (!android::base::Readlink(fd_path, &result)) {
+-        ALOGE("readlink(%s) failed: %m", fd_path.c_str());
++        // A sandbox can deny procfs symlink access. The descriptor still
++        // needs to pass the ashmem device check rather than the memfd check.
++        if (errno != EPERM && errno != EACCES) {
++            ALOGE("readlink(%s) failed: %m", fd_path.c_str());
++        }
+         return false;
+     }
+ 
+diff --git a/libprocessgroup/processgroup.cpp b/libprocessgroup/processgroup.cpp
+index cea22b7a6c3a18aac6ce935056ae99aa346d2366..8950ff7c804d28cf34cbc68429655fb3a00400c6 100644
+--- a/libprocessgroup/processgroup.cpp
++++ b/libprocessgroup/processgroup.cpp
+@@ -28,7 +28,9 @@
+ #include <stdlib.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#include <sys/vfs.h>
+ #include <unistd.h>
++#include <linux/magic.h>
+ 
+ #include <chrono>
+ #include <cstring>
+@@ -78,6 +80,27 @@ bool CgroupGetControllerPath(const std::string& cgroup_name, std::string* path)
+     return true;
+ }
+ 
++// v1 cpuacct is the process-membership hierarchy used by older Android releases.
++// Select only a real mounted hierarchy; a JSON entry alone is not a capability.
++static bool GetProcessGroupHierarchy(std::string* path, bool* v2) {
++    for (const auto& name : {CGROUPV2_HIERARCHY_NAME, std::string("cpuacct")}) {
++        auto controller = CgroupMap::GetInstance().FindController(name);
++        if (!controller.HasValue()) continue;
++        const bool is_v2 = controller.version() == 2;
++        struct statfs fs;
++        if (statfs(controller.path(), &fs) != 0 ||
++            fs.f_type != (is_v2 ? CGROUP2_SUPER_MAGIC : CGROUP_SUPER_MAGIC) ||
++            access((std::string(controller.path()) + "/cgroup.procs").c_str(), F_OK) != 0) {
++            continue;
++        }
++        *path = controller.path();
++        *v2 = is_v2;
++        return true;
++    }
++    errno = ENODEV;
++    return false;
++}
++
+ static bool CgroupKillAvailable() {
+     static std::once_flag f;
+     static bool cgroup_kill_available = false;
+@@ -276,7 +299,7 @@ static void UnfreezeProcess(std::string const& path) {
+     }
+ }
+ 
+-static bool RemoveEmptyUidCgroups(const std::string& uid_path) {
++static bool RemoveEmptyUidCgroups(const std::string& uid_path, bool v2_path) {
+     std::unique_ptr<DIR, decltype(&closedir)> uid(opendir(uid_path.c_str()), closedir);
+     bool empty = true;
+     if (uid != NULL) {
+@@ -295,7 +318,7 @@ static bool RemoveEmptyUidCgroups(const std::string& uid_path) {
+             if (rmdir(path.c_str()) == -1) {
+                 if (errno != EBUSY) {
+                     PLOG(WARNING) << "Failed to remove " << path << " " << errno;
+-                } else {
++                } else if (v2_path) {
+                     UnfreezeProcess(path);
+                 }
+                 empty = false;
+@@ -308,27 +331,28 @@ static bool RemoveEmptyUidCgroups(const std::string& uid_path) {
+ void removeAllEmptyProcessGroups() {
+     LOG(VERBOSE) << "removeAllEmptyProcessGroups()";
+ 
+-    std::vector<std::string> cgroups;
++    std::vector<std::pair<std::string, bool>> cgroups;
+     std::string path, memcg_apps_path;
++    bool v2_path = false;
+ 
+-    if (CgroupGetControllerPath(CGROUPV2_HIERARCHY_NAME, &path)) {
+-        cgroups.push_back(path);
++    if (GetProcessGroupHierarchy(&path, &v2_path)) {
++        cgroups.emplace_back(path, v2_path);
+     }
+-    if (android::libprocessgroup_flags::cgroup_v2_sys_app_isolation()) {
++    if (v2_path && android::libprocessgroup_flags::cgroup_v2_sys_app_isolation()) {
+         for (const char* sub : {"apps", "system"}) {
+             std::string subpath = path + "/" + sub;
+             struct stat st;
+             if (stat(subpath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+-                cgroups.push_back(subpath);
++                cgroups.emplace_back(subpath, true);
+             }
+         }
+     }
+ 
+     if (CgroupGetMemcgAppsPath(&memcg_apps_path) && memcg_apps_path != path) {
+-        cgroups.push_back(memcg_apps_path);
++        cgroups.emplace_back(memcg_apps_path, false);
+     }
+ 
+-    for (std::string cgroup_root_path : cgroups) {
++    for (const auto& [cgroup_root_path, root_is_v2] : cgroups) {
+         std::unique_ptr<DIR, decltype(&closedir)> root(opendir(cgroup_root_path.c_str()), closedir);
+         if (root == NULL) {
+             PLOG(ERROR) << __func__ << " failed to open " << cgroup_root_path;
+@@ -344,7 +368,7 @@ void removeAllEmptyProcessGroups() {
+                 }
+ 
+                 auto path = StringPrintf("%s/%s", cgroup_root_path.c_str(), dir->d_name);
+-                if (!RemoveEmptyUidCgroups(path)) {
++                if (!RemoveEmptyUidCgroups(path, root_is_v2)) {
+                     LOG(VERBOSE) << "Skip removing " << path;
+                     continue;
+                 }
+@@ -411,10 +435,17 @@ bool sendSignalToProcessGroup(uid_t uid, pid_t initialPid, int signal) {
+ 
+     if (CgroupsAvailable()) {
+         std::string hierarchy_root_path, cgroup_v2_path;
+-        CgroupGetControllerPath(CGROUPV2_HIERARCHY_NAME, &hierarchy_root_path);
+-        cgroup_v2_path = ConvertUidPidToPath(hierarchy_root_path.c_str(), uid, initialPid, true);
++        bool v2_path;
++        if (!GetProcessGroupHierarchy(&hierarchy_root_path, &v2_path)) {
++            const int saved_errno = errno;
++            PLOG(ERROR) << "No mounted process-group hierarchy";
++            kill(-initialPid, signal);
++            errno = saved_errno;
++            return false;
++        }
++        cgroup_v2_path = ConvertUidPidToPath(hierarchy_root_path.c_str(), uid, initialPid, v2_path);
+ 
+-        if (signal == SIGKILL && CgroupKillAvailable()) {
++        if (v2_path && signal == SIGKILL && CgroupKillAvailable()) {
+             LOG(VERBOSE) << "Using " << PROCESSGROUP_CGROUP_KILL_FILE << " to SIGKILL "
+                          << cgroup_v2_path;
+ 
+@@ -444,11 +475,13 @@ bool sendSignalToProcessGroup(uid_t uid, pid_t initialPid, int signal) {
+         const auto procsfilepath = cgroup_v2_path + '/' + PROCESSGROUP_CGROUP_PROCS_FILE;
+         std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(procsfilepath.c_str(), "re"), fclose);
+         if (!fp) {
++            const int saved_errno = errno;
+             // This should only happen if the cgroup has already been removed with a successful call
+             // to killProcessGroup. Callers should only retry sendSignalToProcessGroup or
+             // killProcessGroup calls if they fail without ENOENT.
+             PLOG(ERROR) << "Failed to open " << procsfilepath;
+             kill(-initialPid, signal);
++            errno = saved_errno;
+             return false;
+         }
+ 
+@@ -572,6 +605,29 @@ static int KillProcessGroup(
+         return -1;
+     }
+ 
++    std::string legacy_path;
++    bool v2_path;
++    if (CgroupsAvailable() && GetProcessGroupHierarchy(&legacy_path, &v2_path) && !v2_path) {
++        // v1 has no cgroup.events or cgroup.kill. Read actual cgroup.procs for
++        // signalling and retry removal until the kernel reports it empty.
++        int ret;
++        do {
++            if (!sendSignalToProcessGroup(uid, initialPid, signal) && errno != ENOENT) return -1;
++            ret = RemoveCgroup(legacy_path.c_str(), uid, initialPid, false);
++            if (ret == 0 || errno != EBUSY || once ||
++                std::chrono::steady_clock::now() >= until) break;
++            const auto now = std::chrono::steady_clock::now();
++            if (now < until) std::this_thread::sleep_for(std::min(5ms, toMillisec(until - now)));
++        } while (true);
++        if (ret == 0 && isMemoryCgroupSupported() && UsePerAppMemcg()) {
++            std::string memcg_path;
++            if (CgroupGetMemcgAppsPath(&memcg_path) && memcg_path != legacy_path) {
++                ret = RemoveCgroup(memcg_path.c_str(), uid, initialPid, false);
++            }
++        }
++        return ret;
++    }
++
+     // Always attempt to send a kill signal to at least the initialPid, at least once, regardless of
+     // whether its cgroup exists or not. This should only be necessary if a bug results in the
+     // migration of the targeted process out of its cgroup, which we will also attempt to kill.
+@@ -738,6 +794,13 @@ int createProcessGroup(uid_t uid, pid_t initialPid, bool memControl) {
+         return -1;
+     }
+ 
++    std::string cgroup;
++    bool v2_path;
++    if (!GetProcessGroupHierarchy(&cgroup, &v2_path)) {
++        PLOG(ERROR) << "No mounted process-group hierarchy";
++        return -errno;
++    }
++
+     if (memControl && !UsePerAppMemcg()) {
+         LOG(ERROR) << "service memory controls are used without per-process memory cgroup support";
+         return -EINVAL;
+@@ -754,9 +817,7 @@ int createProcessGroup(uid_t uid, pid_t initialPid, bool memControl) {
+         }
+     }
+ 
+-    std::string cgroup;
+-    CgroupGetControllerPath(CGROUPV2_HIERARCHY_NAME, &cgroup);
+-    return createProcessGroupInternal(uid, initialPid, cgroup, true);
++    return createProcessGroupInternal(uid, initialPid, cgroup, v2_path);
+ }
+ 
+ static bool SetProcessGroupValue(pid_t tid, const std::string& attr_name, int64_t value) {
+diff --git a/libprocessgroup/profiles/Android.bp b/libprocessgroup/profiles/Android.bp
+index 52ebca94c70fde086f2e08af7836cf07253acede..b80158b4d34e67f4d718bcc3d7f8d656c128b430 100644
+--- a/libprocessgroup/profiles/Android.bp
++++ b/libprocessgroup/profiles/Android.bp
+@@ -19,7 +19,10 @@ package {
+ 
+ prebuilt_etc {
+     name: "cgroups.json",
+-    src: "cgroups.json",
++    src: select(soong_config_variable("mako", "cgroup_version"), {
++        "1": "cgroups.mako.v1.json",
++        default: "cgroups.json",
++    }),
+     required: [
+         "cgroups_28.json",
+         "cgroups_29.json",
+@@ -31,7 +34,10 @@ prebuilt_etc {
+     name: "cgroups.recovery.json",
+     filename: "cgroups.json",
+     recovery: true,
+-    src: "cgroups.recovery.json",
++    src: select(soong_config_variable("mako", "recovery_cgroup_version"), {
++        "1": "cgroups.recovery.v1.json",
++        default: "cgroups.recovery.json",
++    }),
+ }
+ 
+ prebuilt_etc {
+diff --git a/libprocessgroup/profiles/cgroups.mako.v1.json b/libprocessgroup/profiles/cgroups.mako.v1.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..24e7142e7cd73e867c759b06a1c65ba70257b05e
+--- /dev/null
++++ b/libprocessgroup/profiles/cgroups.mako.v1.json
+@@ -0,0 +1,31 @@
++{
++  "Cgroups": [
++    {
++      "Controller": "cpuacct",
++      "Path": "/acct",
++      "Mode": "0755"
++    },
++    {
++      "Controller": "cpu",
++      "Path": "/dev/cpuctl",
++      "Mode": "0755",
++      "UID": "system",
++      "GID": "system"
++    },
++    {
++      "Controller": "cpuset",
++      "Path": "/dev/cpuset",
++      "Mode": "0755",
++      "UID": "system",
++      "GID": "system"
++    },
++    {
++      "Controller": "blkio",
++      "Path": "/dev/blkio",
++      "Mode": "0775",
++      "UID": "system",
++      "GID": "system",
++      "Optional": true
++    }
++  ]
++}
+diff --git a/libprocessgroup/profiles/cgroups.recovery.v1.json b/libprocessgroup/profiles/cgroups.recovery.v1.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..3971b83ed9c296f871ee3cd19270495c610d8bb6
+--- /dev/null
++++ b/libprocessgroup/profiles/cgroups.recovery.v1.json
+@@ -0,0 +1,11 @@
++{
++  "Cgroups": [
++    {
++      "Controller": "cpuacct",
++      "Path": "/acct",
++      "Mode": "0755",
++      "UID": "root",
++      "GID": "root"
++    }
++  ]
++}
+diff --git a/libprocessgroup/setup/cgroup_map_write.cpp b/libprocessgroup/setup/cgroup_map_write.cpp
+index 899b4e9524727256ff213e795c49e63bbeae005f..05a4524ebc8b90191b49c34dbd5a25d166c28cf5 100644
+--- a/libprocessgroup/setup/cgroup_map_write.cpp
++++ b/libprocessgroup/setup/cgroup_map_write.cpp
+@@ -200,8 +200,17 @@ static bool MountV1CgroupController(const CgroupDescriptor& descriptor) {
+         options += ",noprefix,cpuset_v2_mode";
+     }
+ 
+-    if (mount("none", controller->path(), "cgroup", MS_NODEV | MS_NOEXEC | MS_NOSUID,
+-              options.c_str())) {
++    int mount_result = mount("none", controller->path(), "cgroup",
++                             MS_NODEV | MS_NOEXEC | MS_NOSUID, options.c_str());
++    if (mount_result && (errno == EINVAL || errno == ENOENT) &&
++        !strcmp(controller->name(), "cpuset")) {
++        // Older v1 kernels have real cpusets but not the newer hotplug mode.
++        // Keep their native v1 semantics; do not pretend cpuset_v2_mode exists.
++        LOG(INFO) << "cpuset_v2_mode unavailable; retrying native v1 cpuset";
++        mount_result = mount("none", controller->path(), "cgroup",
++                             MS_NODEV | MS_NOEXEC | MS_NOSUID, "cpuset,noprefix");
++    }
++    if (mount_result) {
+         if (IsOptionalController(controller)) {
+             PLOG(INFO) << "Failed to mount optional controller " << controller->name();
+             return true;
+@@ -298,7 +307,8 @@ bool CgroupSetup() {
+ 
+     // System / app isolation.
+     // This really belongs in early-init in init.rc, but we cannot use the flag there.
+-    if (android::libprocessgroup_flags::cgroup_v2_sys_app_isolation()) {
++    if (android::libprocessgroup_flags::cgroup_v2_sys_app_isolation() &&
++        descriptors.contains(CGROUPV2_HIERARCHY_NAME)) {
+         const auto it = descriptors.find(CGROUPV2_HIERARCHY_NAME);
+         const std::string cgroup_v2_root = (it == descriptors.end())
+                                                    ? CGROUP_V2_ROOT_DEFAULT
