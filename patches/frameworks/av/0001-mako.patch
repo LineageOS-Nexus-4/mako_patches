@@ -1,0 +1,217 @@
+diff --git a/drm/libmediadrm/DrmHalHidl.cpp b/drm/libmediadrm/DrmHalHidl.cpp
+index 33ea5ea9fc3cbb7e80f22b15a003b020602f6e3b..e0398cd916a9dcabbf764ea3e15b75237806d63f 100644
+--- a/drm/libmediadrm/DrmHalHidl.cpp
++++ b/drm/libmediadrm/DrmHalHidl.cpp
+@@ -40,6 +40,8 @@
+ #include <mediadrm/IDrmMetricsConsumer.h>
+ #include <utils/Log.h>
+ 
++#include <algorithm>
++#include <array>
+ #include <iomanip>
+ #include <vector>
+ 
+@@ -75,6 +77,9 @@ namespace {
+ // in the MediaDrm API.
+ constexpr char kPropertyDeviceUniqueId[] = "deviceUniqueId";
+ constexpr char kEqualsSign[] = "=";
++constexpr std::array<uint8_t, 16> kWidevineUuid = {
++        0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
++        0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed};
+ 
+ template <typename T>
+ std::string toBase64StringNoPad(const T* data, size_t size) {
+@@ -327,6 +332,7 @@ void DrmHalHidl::cleanup() {
+     mPluginV1_1.clear();
+     mPluginV1_2.clear();
+     mPluginV1_4.clear();
++    mUsesLegacyWidevine = false;
+ }
+ 
+ std::vector<sp<IDrmFactory>> DrmHalHidl::makeDrmFactories() {
+@@ -592,6 +598,8 @@ DrmStatus DrmHalHidl::createPlugin(const uint8_t uuid[16], const String8& appPac
+         }
+     }
+ 
++    mUsesLegacyWidevine = mInitCheck == OK && mPluginV1_1 == nullptr &&
++            std::equal(kWidevineUuid.begin(), kWidevineUuid.end(), uuid);
+     return DrmStatus(mInitCheck);
+ }
+ 
+@@ -1099,14 +1107,32 @@ DrmStatus DrmHalHidl::getSecurityLevel(Vector<uint8_t> const& sessionId,
+     if (level == NULL) {
+         return DrmStatus(BAD_VALUE);
+     }
+-    DrmStatus err = UNKNOWN_ERROR;
++    *level = DrmPlugin::kSecurityLevelUnknown;
+ 
+     if (mPluginV1_1 == NULL) {
+-        return DrmStatus(ERROR_DRM_CANNOT_HANDLE);
++        if (!mUsesLegacyWidevine) {
++            return DrmStatus(ERROR_DRM_CANNOT_HANDLE);
++        }
++        const bool sessionOpen = std::any_of(mOpenSessions.begin(), mOpenSessions.end(),
++                [&](const auto& session) { return isEqualSessionId(session->mSessionId, sessionId); });
++        if (!sessionOpen) {
++            return DrmStatus(ERROR_DRM_SESSION_NOT_OPENED);
++        }
++        // The HIDL 1.0 Widevine plugin exposes its software-only L3 level as
++        // a property. Report it for open sessions so clients can select a decoder.
++        String8 legacyLevel;
++        const DrmStatus status = getPropertyStringInternal(String8("securityLevel"), legacyLevel);
++        if (status != OK) {
++            return status;
++        }
++        if (legacyLevel != String8("L3")) {
++            return DrmStatus(ERROR_DRM_CANNOT_HANDLE);
++        }
++        *level = DrmPlugin::kSecurityLevelSwSecureCrypto;
++        return DrmStatus(OK);
+     }
+ 
+-    *level = DrmPlugin::kSecurityLevelUnknown;
+-
++    DrmStatus err = UNKNOWN_ERROR;
+     Return<void> hResult = mPluginV1_1->getSecurityLevel(toHidlVec(sessionId),
+                                                          [&](Status status, SecurityLevel hLevel) {
+                                                              if (status == Status::OK) {
+diff --git a/drm/libmediadrm/include/mediadrm/DrmHalHidl.h b/drm/libmediadrm/include/mediadrm/DrmHalHidl.h
+index 73a9e1d0133866d19e93fa6ec91cb32bf00e2735..72c5fa47ce7165d0c1c6543ec86d06893a326e14 100644
+--- a/drm/libmediadrm/include/mediadrm/DrmHalHidl.h
++++ b/drm/libmediadrm/include/mediadrm/DrmHalHidl.h
+@@ -213,6 +213,7 @@ private:
+     sp<drm::V1_1::IDrmPlugin> mPluginV1_1;
+     sp<drm::V1_2::IDrmPlugin> mPluginV1_2;
+     sp<drm::V1_4::IDrmPlugin> mPluginV1_4;
++    bool mUsesLegacyWidevine = false;
+     String8 mAppPackageName;
+ 
+     // Mutable to allow modification within GetPropertyByteArray.
+diff --git a/media/codec2/components/avc/C2SoftAvcDec.cpp b/media/codec2/components/avc/C2SoftAvcDec.cpp
+index a005b6a820a68775be3d7a759fc51f0b0b66e98a..6e2e1a0550a9469927add0c0942995b6162e6969 100644
+--- a/media/codec2/components/avc/C2SoftAvcDec.cpp
++++ b/media/codec2/components/avc/C2SoftAvcDec.cpp
+@@ -720,8 +720,64 @@ static void fillEmptyWork(const std::unique_ptr<C2Work> &work) {
+     work->workletsProcessed = 1u;
+ }
+ 
+-void C2SoftAvcDec::finishWork(uint64_t index, const std::unique_ptr<C2Work> &work) {
+-    std::shared_ptr<C2Buffer> buffer = createGraphicBuffer(std::move(mOutBlock),
++void C2SoftAvcDec::convertYV12ToRGBA(const C2GraphicView &yv12, const C2GraphicView &rgba,
++                                      uint32_t width, uint32_t height) {
++    const C2PlanarLayout &lY = yv12.layout();
++    const C2PlanarLayout &lR = rgba.layout();
++    const uint8_t *const *yuvPlanes = yv12.data();
++    const uint8_t *const *rgbPlanes = rgba.data();
++    const uint8_t *yPlane = yuvPlanes[C2PlanarLayout::PLANE_Y];
++    const uint8_t *vPlane = yuvPlanes[C2PlanarLayout::PLANE_V];
++    const uint8_t *uPlane = yuvPlanes[C2PlanarLayout::PLANE_U];
++    uint32_t yStride = lY.planes[C2PlanarLayout::PLANE_Y].rowInc;
++    uint32_t vStride = lY.planes[C2PlanarLayout::PLANE_V].rowInc;
++    uint32_t uStride = lY.planes[C2PlanarLayout::PLANE_U].rowInc;
++    uint8_t *dst = const_cast<uint8_t *>(rgbPlanes[C2PlanarLayout::PLANE_Y]);
++    uint32_t dstStride = lR.planes[C2PlanarLayout::PLANE_Y].rowInc;
++    for (uint32_t row = 0; row < height; ++row) {
++        const uint8_t *yRow = yPlane + row * yStride;
++        const uint8_t *uRow = uPlane + (row >> 1) * uStride;
++        const uint8_t *vRow = vPlane + (row >> 1) * vStride;
++        uint8_t *outRow = dst + row * dstStride;
++        for (uint32_t col = 0; col < width; ++col) {
++            int32_t Y = yRow[col] - 16;
++            int32_t U = uRow[col >> 1] - 128;
++            int32_t V = vRow[col >> 1] - 128;
++            int32_t R = (298 * Y + 409 * V + 128) >> 8;
++            int32_t G = (298 * Y - 100 * U - 208 * V + 128) >> 8;
++            int32_t B = (298 * Y + 516 * U + 128) >> 8;
++            uint8_t *px = outRow + col * 4;
++            px[0] = R < 0 ? 0 : (R > 255 ? 255 : R);
++            px[1] = G < 0 ? 0 : (G > 255 ? 255 : G);
++            px[2] = B < 0 ? 0 : (B > 255 ? 255 : B);
++            px[3] = 255;
++        }
++    }
++}
++
++void C2SoftAvcDec::finishWork(const std::shared_ptr<C2BlockPool> &pool, uint64_t index,
++                              const std::unique_ptr<C2Work> &work) {
++    std::shared_ptr<C2GraphicBlock> outputBlock = mOutBlock;
++    if (mOutBlock) {
++        // The decoder natively produces YV12. Some GPUs (e.g. the Adreno on
++        // mako/APQ8064) cannot bind a YV12 EGL image as a GL texture, so
++        // convert the output to RGBA_8888 which every GL implementation can
++        // import.
++        uint32_t format = HAL_PIXEL_FORMAT_RGBA_8888;
++        C2MemoryUsage usage = {C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
++        std::shared_ptr<C2GraphicBlock> rgbaBlock;
++        c2_status_t err =
++                pool->fetchGraphicBlock(ALIGN128(mWidth), mHeight, format, usage, &rgbaBlock);
++        if (err == C2_OK && rgbaBlock) {
++            C2GraphicView yv12View = mOutBlock->map().get();
++            C2GraphicView rgbaView = rgbaBlock->map().get();
++            if (!yv12View.error() && !rgbaView.error()) {
++                convertYV12ToRGBA(yv12View, rgbaView, mWidth, mHeight);
++                outputBlock = rgbaBlock;
++            }
++        }
++    }
++    std::shared_ptr<C2Buffer> buffer = createGraphicBuffer(std::move(outputBlock),
+                                                            C2Rect(mWidth, mHeight));
+     mOutBlock = nullptr;
+     {
+@@ -967,7 +1023,7 @@ void C2SoftAvcDec::process(
+         (void)getVuiParams();
+         hasPicture |= (1 == ps_decode_op->u4_frame_decoded_flag);
+         if (ps_decode_op->u4_output_present) {
+-            finishWork(ps_decode_op->u4_ts, work);
++            finishWork(pool, ps_decode_op->u4_ts, work);
+             configUpdateQueued = c2_cntr64_t(ps_decode_op->u4_ts) == work->input.ordinal.frameIndex;
+         }
+         inPos += ps_decode_op->u4_num_bytes_consumed;
+@@ -1031,7 +1087,7 @@ c2_status_t C2SoftAvcDec::drainInternal(
+         }
+         (void) ivdec_api_function(mDecHandle, &s_h264d_decode_ip, &s_h264d_decode_op);
+         if (ps_decode_op->u4_output_present) {
+-            finishWork(ps_decode_op->u4_ts, work);
++            finishWork(pool, ps_decode_op->u4_ts, work);
+         } else {
+             fillEmptyWork(work);
+             break;
+diff --git a/media/codec2/components/avc/C2SoftAvcDec.h b/media/codec2/components/avc/C2SoftAvcDec.h
+index 0104bb0f0d9f596556bff76b8b03d167ac3af3a2..1c049caecaa05ef969b19b77a3161fd95e94470d 100644
+--- a/media/codec2/components/avc/C2SoftAvcDec.h
++++ b/media/codec2/components/avc/C2SoftAvcDec.h
+@@ -129,7 +129,10 @@ private:
+                        uint32_t tsMarker);
+     bool getVuiParams();
+     c2_status_t ensureDecoderState(const std::shared_ptr<C2BlockPool> &pool);
+-    void finishWork(uint64_t index, const std::unique_ptr<C2Work> &work);
++    void finishWork(const std::shared_ptr<C2BlockPool> &pool, uint64_t index,
++                    const std::unique_ptr<C2Work> &work);
++    static void convertYV12ToRGBA(const C2GraphicView &yv12, const C2GraphicView &rgba,
++                                  uint32_t width, uint32_t height);
+     status_t setFlushMode();
+     c2_status_t drainInternal(
+             uint32_t drainMode,
+diff --git a/services/camera/libcameraservice/device3/Camera3Device.cpp b/services/camera/libcameraservice/device3/Camera3Device.cpp
+index 86efe37f9ade1458917bda3c7ddcb594b3bf2917..dc7f04f2daddcf45a92368a3b2d1ea98348f1582 100644
+--- a/services/camera/libcameraservice/device3/Camera3Device.cpp
++++ b/services/camera/libcameraservice/device3/Camera3Device.cpp
+@@ -301,6 +301,18 @@ status_t Camera3Device::disconnectImpl() {
+     status_t res = OK;
+     std::vector<wp<Camera3StreamInterface>> streams;
+     nsecs_t maxExpectedDuration = getExpectedInFlightDuration();
++    if (mRequestThread != NULL) {
++        // Flush the HAL before the drain (outside mLock: the flush's
++        // result delivery may need mLock and would deadlock the
++        // disconnect otherwise). The mako camera shim needs the flush as
++        // the "session is closing" signal to stop feeding the app's
++        // (already detached) consumer; without it the drain blocks for
++        // the full 5s timeout on the app-held preview buffers, the forced
++        // error-state teardown leaves the kernel VFE/stream state dirty
++        // and the next camera either fails to start (QBUF EINVAL) or
++        // faults the VFE (IOMMU page fault -> watchdog reboot).
++        mRequestThread->flush();
++    }
+     {
+         Mutex::Autolock l(mLock);
+         if (mStatus == STATUS_UNINITIALIZED) return res;
