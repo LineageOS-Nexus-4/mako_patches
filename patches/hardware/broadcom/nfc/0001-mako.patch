@@ -1,0 +1,76 @@
+diff --git a/Android.bp b/Android.bp
+index 0222fe956dfe460c7369d7d54c651f39afe99df4..7d93ff30db408205d2feb7b3bb6842879ddd01c9 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -1,5 +1,5 @@
+ cc_library_shared {
+-    name: "nfc_nci.bcm2079x.default",
++    name: "nfc_nci.default",
+     proprietary: true,
+     relative_install_path: "hw",
+     srcs: [
+diff --git a/halimpl/bcm2079x/include/StartupConfig.h b/halimpl/bcm2079x/include/StartupConfig.h
+index 1dbb5c395a60279acb18eebed93c7cec031a3695..f99811bc6c91b1432d8d7bb79995ddf5ea239326 100644
+--- a/halimpl/bcm2079x/include/StartupConfig.h
++++ b/halimpl/bcm2079x/include/StartupConfig.h
+@@ -25,6 +25,44 @@
+ #include <string>
+ #include "bt_types.h"
+ 
++// mako bring-up: the BCM stack uses std::basic_string<uint8_t>; modern
++// libc++ does not define char_traits<unsigned char>, which made the
++// implicit instantiation an error. Provide the standard specialization.
++namespace std {
++template <>
++struct char_traits<unsigned char> {
++  typedef unsigned char char_type;
++  typedef int int_type;
++  typedef streamoff off_type;
++  typedef streampos pos_type;
++  typedef mbstate_t state_type;
++  static void assign(char_type& c1, const char_type& c2) { c1 = c2; }
++  static bool eq(const char_type& c1, const char_type& c2) { return c1 == c2; }
++  static bool lt(const char_type& c1, const char_type& c2) { return c1 < c2; }
++  static int compare(const char_type* s1, const char_type* s2, size_t n) {
++    return memcmp(s1, s2, n);
++  }
++  static size_t length(const char_type* s) { return strlen((const char*)s); }
++  static const char_type* find(const char_type* s, size_t n, const char_type& a) {
++    return (const char_type*)memchr(s, a, n);
++  }
++  static char_type* move(char_type* s1, const char_type* s2, size_t n) {
++    return (char_type*)memmove(s1, s2, n);
++  }
++  static char_type* copy(char_type* s1, const char_type* s2, size_t n) {
++    return (char_type*)memcpy(s1, s2, n);
++  }
++  static char_type* assign(char_type* s, size_t n, char_type a) {
++    return (char_type*)memset(s, a, n);
++  }
++  static int_type not_eof(const int_type& c) { return c != int_type(EOF) ? c : !c; }
++  static char_type to_char_type(const int_type& c) { return char_type(c); }
++  static int_type to_int_type(const char_type& c) { return int_type(c); }
++  static bool eq_int_type(const int_type& c1, const int_type& c2) { return c1 == c2; }
++  static int_type eof() { return int_type(EOF); }
++};
++}  // namespace std
++
+ class StartupConfig {
+  public:
+   typedef std::basic_string<uint8_t> uint8_string;
+diff --git a/halimpl/bcm2079x/nfc_nci.c b/halimpl/bcm2079x/nfc_nci.c
+index 6948fb661b8b74b97e0eac64a860a3e55493f118..235e10ad601e9109dabe7ef11b0f17c68492ce56 100644
+--- a/halimpl/bcm2079x/nfc_nci.c
++++ b/halimpl/bcm2079x/nfc_nci.c
+@@ -155,7 +155,10 @@ struct nfc_nci_module_t HAL_MODULE_INFO_SYM = {
+             .tag = HARDWARE_MODULE_TAG,
+             .module_api_version = 0x0100,  // [15:8] major, [7:0] minor (1.0)
+             .hal_api_version = 0x00,       // 0 is only valid value
+-            .id = NFC_NCI_BCM2079X_HARDWARE_MODULE_ID,
++            /* mako bring-up: modern hw_get_module requires the module id
++             * to match the requested id exactly ("nfc_nci"); the legacy
++             * BCM2079X id breaks the strict check. */
++            .id = NFC_NCI_HARDWARE_MODULE_ID,
+             .name = "BCM2079x NFC NCI HW HAL",
+             .author = "Broadcom Corporation",
+             .methods = &nfc_module_methods,
